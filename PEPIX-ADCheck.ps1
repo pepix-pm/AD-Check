@@ -635,7 +635,7 @@ Invoke-Check 'COMPUTERS' {
             Wersja          = $f.L.Wersja
             Komputery       = $_.Count
             AktywneOstatnio = @($_.Group | Where-Object { $_.C.LastLogonDate -ge $staleDt }).Count
-            KoniecWsparcia  = Format-Date $f.L.Koniec
+            KoniecWsparcia  = (Format-Date $f.L.Koniec)
         })
     }
 
@@ -785,7 +785,8 @@ Invoke-Check 'LAPS-ACL' {
     }
     $rows = @($aces | Group-Object Sid, Uprawnienie | ForEach-Object {
         $f = $_.Group[0]
-        $name = try { (New-Object System.Security.Principal.SecurityIdentifier $f.Sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $f.Sid }
+        $name = $f.Sid
+        try { $name = (New-Object System.Security.Principal.SecurityIdentifier $f.Sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $name = $f.Sid }
         [pscustomobject]@{ Podmiot = $name; Uprawnienie = $f.Uprawnienie; LiczbaKontenerow = @($_.Group | ForEach-Object { $_.Kontener } | Sort-Object -Unique).Count
                            Przyklad = $f.Kontener; SID = $f.Sid }
     })
@@ -1033,8 +1034,8 @@ Invoke-Check 'REPL' {
                 $code = [int]$m.LastReplicationResult
                 $rows.Add([pscustomobject]@{
                     DC            = $dc.HostName
-                    Partner       = (($m.Partner -split ',')[1]) -replace '^CN=', ''
-                    Partycja      = Get-NcName $m.Partition
+                    Partner       = ((($m.Partner -split ',')[1]) -replace '^CN=', '')   # nawiasy wymagane: hashtable wewnątrz .Add(), przecinek = separator argumentów
+                    Partycja      = (Get-NcName $m.Partition)
                     OstatniSukces = $(if ($m.LastReplicationSuccess) { $m.LastReplicationSuccess.ToString('yyyy-MM-dd HH:mm') } else { 'nigdy' })
                     KolejneBledy  = $m.ConsecutiveReplicationFailureCount
                     KodBledu      = $code
