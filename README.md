@@ -148,6 +148,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-LDAPSIGN | Medium | Podpisywanie LDAP niewymagane | T1557 |
 | DC-LDAPCBT | Medium | LDAP channel binding niewymuszony | T1557 |
 | DC-NTLMV1 | Medium | DC akceptuje NTLMv1/LM | T1557.001 |
+| DC-CIS-REG | wg najgorszego ustawienia | Opcje zabezpieczeń i szablony administracyjne DC niezgodne z CIS L1 (42 ustawienia) | – |
+| DC-CIS-AUDIT | wg najgorszego ustawienia | Zaawansowane zasady audytu DC niezgodne z CIS L1 (24 podkategorie) | T1562.002 |
+| DC-CIS-RIGHTS | wg najgorszego ustawienia | Przypisanie praw użytkowników na DC niezgodne z CIS L1 (16 praw) | T1078.002 |
+| DC-CIS-SUMMARY | Info | Procent zgodności i pełna lista sprawdzonych ustawień | – |
 | DC-REPL-TSL | Critical | Replikacja nieudana dłużej niż tombstone lifetime | – |
 | D-FSMO | Critical | Role FSMO przypisane do nieistniejącego DC | – |
 | DC-REPL-FAIL | High | Błędy replikacji AD (z opisem kodu błędu) | – |
@@ -162,6 +166,18 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-GPO-SYNC | Medium | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC | – |
 | DC-DNS-SRV | Medium | DC bez rekordu SRV `_ldap._tcp.dc._msdcs` | – |
 
+## Konfiguracja DC wg CIS
+
+Wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) – nie pełna ocena zgodności z CIS. Treści zaleceń CIS nie są kopiowane (licencja CIS); raport podaje nazwę ustawienia, wartość oczekiwaną i aktualną.
+
+| Obszar | Zwykłe konto (domyślnie) | `-UseWinRM` (admin na DC) |
+|---|---|---|
+| Opcje zabezpieczeń, szablony administracyjne | GPO domeny i OU Domain Controllers: `GptTmpl.inf`, `Registry.pol` | rzeczywisty rejestr każdego DC |
+| Zasady audytu | `audit.csv` w GPO | `auditpol /get /category:*` na każdym DC |
+| Przypisanie praw użytkowników | `GptTmpl.inf` w GPO | jw. (odczyt rzeczywisty wymagałby zapisu pliku na DC) |
+
+Ustawienie nieobecne w GPO oceniane jest według wartości domyślnej systemu; jeśli domyślna jest niezgodna z CIS – jako niezgodne. Kolejność GPO jak w pozostałych testach: domena, potem OU Domain Controllers, wg kolejności łączy; flaga Enforced i filtrowanie zabezpieczeń/WMI nie są uwzględniane. Listy kontroli są w skrypcie (`$cisReg`, `$cisAudit`, `$cisRights`).
+
 ## LAPS
 
 Skrypt rozpoznaje LAPS legacy (`ms-Mcs-AdmPwd`) i Windows LAPS (`msLAPS-*`). Sprawdza pokrycie, rotację haseł (data wygaśnięcia vs ostatnie logowanie komputera) oraz **kto może odczytać hasła** – z ACL kontenerów, w których są komputery (prawo rozszerzone do atrybutu hasła, wszystkie prawa rozszerzone, pełna kontrola). Sprawdza też, czy konto użyte do przeglądu widzi hasła: filtr LDAP zwraca tylko komputery z czytelnym hasłem – **wartości haseł nie są pobierane ani zapisywane**. Nie są analizowane uprawnienia nadane bezpośrednio na pojedynczych obiektach komputerów ani właściciel obiektu.
@@ -173,6 +189,14 @@ Testy działają na zwykłym koncie: metadane replikacji przez AD Web Services, 
 ## Wersje systemów
 
 Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `operatingSystemVersion` kont komputerów w AD – bez łączenia się z komputerami. Tabela dat (`$win11Builds`, `$win10Ltsc`, `$serverEol`, `$legacyClient`, `$osLifecycleAsOf`) jest w skrypcie i **wymaga aktualizacji przy nowych wersjach Windows**; nieznane wersje nie są oceniane. Pełny rozkład systemów jest w załączniku A raportu.
+
+## Testy jednostkowe
+
+```powershell
+Invoke-Pester .\tests
+```
+
+Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezależnych od AD i ich nie uruchamiają.
 
 ## Ograniczenia
 

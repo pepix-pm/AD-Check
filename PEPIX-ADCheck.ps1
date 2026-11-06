@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.6)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.7)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -32,7 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.6'
+$Version = '0.7'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -89,6 +89,7 @@ $catComp = 'Komputery'
 $catDom  = 'Domena i las'
 $catDC   = 'Kontrolery domeny'
 $catHealth = 'Kondycja domeny i replikacja'
+$catCis    = 'Konfiguracja DC (CIS L1)'
 
 #region ---------- funkcje pomocnicze ----------
 function Format-Date($d) { if ($d) { ([datetime]$d).ToString('yyyy-MM-dd') } else { '—' } }
@@ -328,6 +329,135 @@ $mapCbt  = @{ 0 = '0 (nigdy)'; 1 = '1 (gdy obsługiwane)'; 2 = '2 (zawsze)' }
 $mapLm   = @{ 0 = '0 (LM i NTLM)'; 1 = '1 (LM i NTLM, NTLMv2 gdy negocjowane)'; 2 = '2 (tylko NTLM)'
               3 = '3 (tylko NTLMv2)'; 4 = '4 (odrzuca LM)'; 5 = '5 (odrzuca LM i NTLMv1)' }
 function Show-Val($v, $map) { if ($null -eq $v) { 'nieustawione' } elseif ($map.ContainsKey([int]$v)) { $map[[int]$v] } else { "$v" } }
+# ---------- GPO kontrolerów domeny (dla kontroli CIS) ----------
+# Registry.pol: nagłówek 'PReg' + wersja (4 B), potem wpisy [klucz;wartość;typ;rozmiar;dane] - łańcuchy UTF-16LE zakończone 0x0000.
+# Wpis '**del.<nazwa>' usuwa wartość ustawioną przez GPO o niższym priorytecie; pozostałe wpisy '**' są pomijane.
+function Read-RegistryPol([byte[]]$Bytes) {
+    $list = [System.Collections.Generic.List[object]]::new()
+    if (-not $Bytes -or $Bytes.Length -lt 8 -or [System.Text.Encoding]::ASCII.GetString($Bytes, 0, 4) -ne 'PReg') { return $list }
+    $u = [System.Text.Encoding]::Unicode
+    $i = 8
+    while ($i + 2 -le $Bytes.Length) {
+        if ($Bytes[$i] -ne 0x5B -or $Bytes[$i + 1] -ne 0) { break }   # '['
+        $i += 2
+        $f = @()
+        for ($n = 0; $n -lt 2; $n++) {
+            $s = $i
+            while ($i + 1 -lt $Bytes.Length -and -not ($Bytes[$i] -eq 0 -and $Bytes[$i + 1] -eq 0)) { $i += 2 }
+            $f += $u.GetString($Bytes, $s, $i - $s)
+            $i += 4   # 0x0000 i ';'
+        }
+        $type = [BitConverter]::ToUInt32($Bytes, $i); $i += 6   # typ i ';'
+        $size = [BitConverter]::ToUInt32($Bytes, $i); $i += 6   # rozmiar i ';'
+        $data = $null
+        switch ($type) {
+            4  { if ($size -ge 4) { $data = [BitConverter]::ToUInt32($Bytes, $i) } }
+            11 { if ($size -ge 8) { $data = [BitConverter]::ToUInt64($Bytes, $i) } }
+            { $_ -in 1, 2, 7 } { if ($size -gt 0) { $data = $u.GetString($Bytes, $i, $size).TrimEnd([char]0) } }
+        }
+        $i += $size + 2   # dane i ']'
+        $name = $f[1]; $deleted = $false
+        if ($name.StartsWith('**del.')) { $name = $name.Substring(6); $deleted = $true }
+        elseif ($name.StartsWith('**')) { continue }   # **delvals, **soft itp. - pomijane (uproszczenie)
+        $entry = [pscustomobject]@{ Key = $f[0]; Name = $name; Type = $type; Data = $data; Deleted = $deleted }
+        $list.Add($entry)
+    }
+    $list
+}
+
+function ConvertTo-Sid([string]$Id) {
+    if ($Id -match '^S-\d-') { return $Id }
+    try { (New-Object System.Security.Principal.NTAccount $Id).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $Id }
+}
+
+$sidNames = @{}
+function Resolve-SidName([string]$Sid) {
+    if (-not $sidNames.ContainsKey($Sid)) {
+        $n = $Sid
+        try { $n = (New-Object System.Security.Principal.SecurityIdentifier $Sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $n = $Sid }
+        $sidNames[$Sid] = $n
+    }
+    $sidNames[$Sid]
+}
+
+# Zbiorcza konfiguracja z GPO podlinkowanych do domeny i OU Domain Controllers (kolejność i uproszczenia jak w Get-DcGpoSettings).
+# Registry: 'ścieżka\wartość' (małe litery, bez HKLM) -> {Wartosc, Zrodlo}; Rights: SeXxx -> {Wartosc = SID-y, Zrodlo}; Audit: GUID podkategorii -> {Wartosc 0-3, Zrodlo}
+function Get-DcGpoPolicy {
+    $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
+    foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
+        $gpLink = (Get-ADObject -Identity $container -Properties gPLink -Server $Server).gPLink
+        if (-not $gpLink) { continue }
+        foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
+            if ([int]$m.Groups[2].Value -band 1) { continue }
+            $gpo = Get-ADObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags -Server $Server
+            if ($gpo.flags -band 2) { continue }
+            $src  = "GPO: $($gpo.displayName)"
+            $root = Join-Path $gpo.gPCFileSysPath 'Machine'
+
+            $inf = Join-Path $root 'Microsoft\Windows NT\SecEdit\GptTmpl.inf'
+            if (Test-Path -LiteralPath $inf) {
+                $sec = ''
+                foreach ($line in (Get-Content -LiteralPath $inf -Encoding Unicode)) {
+                    if ($line -match '^\s*\[(.+)\]\s*$') { $sec = $Matches[1]; continue }
+                    if ($line -notmatch '^\s*([^=]+?)\s*=\s*(.*)$') { continue }
+                    $k = $Matches[1]; $v = $Matches[2].Trim()
+                    if ($sec -eq 'Registry Values') {
+                        $t, $val = $v -split ',', 2
+                        $wart = if ($t -eq '4') { [int64]$val } else { "$val".Trim('"') }
+                        $pol.Registry[($k -replace '^MACHINE\\', '').ToLower()] = [pscustomobject]@{ Wartosc = $wart; Zrodlo = $src }
+                    } elseif ($sec -eq 'Privilege Rights') {
+                        $sids = @($v -split ',' | ForEach-Object { $_.Trim().TrimStart('*') } | Where-Object { $_ } | ForEach-Object { ConvertTo-Sid $_ })
+                        $pol.Rights[$k] = [pscustomobject]@{ Wartosc = $sids; Zrodlo = $src }
+                    }
+                }
+            }
+            $polFile = Join-Path $root 'Registry.pol'
+            if (Test-Path -LiteralPath $polFile) {
+                foreach ($e in @(Read-RegistryPol ([System.IO.File]::ReadAllBytes($polFile)))) {
+                    $key = "$($e.Key)\$($e.Name)".ToLower()
+                    if ($e.Deleted) { [void]$pol.Registry.Remove($key) }
+                    else { $pol.Registry[$key] = [pscustomobject]@{ Wartosc = $e.Data; Zrodlo = $src } }
+                }
+            }
+            $csv = Join-Path $root 'Microsoft\Windows NT\Audit\audit.csv'
+            if (Test-Path -LiteralPath $csv) {
+                foreach ($a in @(Import-Csv -LiteralPath $csv)) {
+                    $g = "$($a.'Subcategory GUID')".Trim('{', '}').ToLower()
+                    if ($g) { $pol.Audit[$g] = [pscustomobject]@{ Wartosc = [int]$a.'Setting Value'; Zrodlo = $src } }
+                }
+            }
+        }
+    }
+    $pol
+}
+
+# Ocena wartości kontroli CIS; $null = nieustawione -> wartość domyślna systemu (D), brak domyślnej = niezgodne
+function Test-CisValue($Value, [hashtable]$Control) {
+    $v = $Value
+    if ($null -eq $v) { $v = $Control.D }
+    if ($null -eq $v) { return $false }
+    try { $n = [int64]$v } catch { return $false }
+    switch ($Control.Op) {
+        'eq'    { return ($n -eq [int64]$Control.E) }
+        'ge'    { return ($n -ge [int64]$Control.E) }
+        'le-nz' { return ($n -gt 0 -and $n -le [int64]$Control.E) }
+        'aes'   { return (($n -band 0x18) -ne 0 -and ($n -band 0x7) -eq 0) }   # AES128/AES256, bez DES i RC4
+    }
+    $false
+}
+
+# Tekst "Inclusion Setting" z auditpol /r -> 0 brak, 1 Success, 2 Failure, 3 oba (angielski i polski)
+function ConvertFrom-AuditText([string]$Text) {
+    $v = 0
+    if ($Text -match '(?i)(^|\s)(success|sukces|powodz)') { $v = $v -bor 1 }
+    if ($Text -match '(?i)(failure|niepowodz|błąd|błęd)') { $v = $v -bor 2 }
+    $v
+}
+
+function Get-TopSeverity($Rows) {
+    foreach ($s in 'Critical', 'High', 'Medium', 'Low') { if (@($Rows | Where-Object Waga -eq $s).Count) { return $s } }
+    'Low'
+}
 #endregion
 
 #region ---------- dane bazowe i inwentaryzacja ----------
@@ -1013,6 +1143,245 @@ if (-not $SkipDCChecks) {
 }
 #endregion
 
+#region ---------- konfiguracja DC wg CIS (profil L1, kontroler domeny) ----------
+# Wybrane kontrole CIS Microsoft Windows Server Benchmark L1 (DC), których nie obejmują inne testy (LDAP signing, NTLM, SMBv1, Spooler są w DC-*).
+# Zwykłe konto: konfiguracja zamierzona z GPO (GptTmpl.inf, Registry.pol, audit.csv). -UseWinRM: rzeczywisty rejestr i auditpol każdego DC.
+# Przypisanie praw użytkowników zawsze z GPO (odczyt rzeczywisty wymagałby secedit /export, czyli zapisu pliku na DC).
+if (-not $SkipDCChecks) {
+    $lsa = 'System\CurrentControlSet\Control\Lsa'; $msv = "$lsa\MSV1_0"; $nl = 'System\CurrentControlSet\Services\Netlogon\Parameters'
+    $polSys = 'Software\Microsoft\Windows\CurrentVersion\Policies\System'; $ts = 'Software\Policies\Microsoft\Windows NT\Terminal Services'
+    $winrm = 'Software\Policies\Microsoft\Windows\WinRM'; $evl = 'Software\Policies\Microsoft\Windows\EventLog'
+    # A: SO = opcje zabezpieczeń, AT = szablony administracyjne; Op: eq / ge / le-nz / aes; D = wartość domyślna, gdy nieustawione ($null = niezgodne)
+    $cisReg = @(
+        @{ A = 'SO'; N = 'Accounts: Limit local account use of blank passwords to console logon only'; P = $lsa; V = 'LimitBlankPasswordUse'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network security: Do not store LAN Manager hash value on next password change'; P = $lsa; V = 'NoLMHash'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'High' }
+        @{ A = 'SO'; N = 'Network access: Do not allow anonymous enumeration of SAM accounts'; P = $lsa; V = 'RestrictAnonymousSAM'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'High' }
+        @{ A = 'SO'; N = 'Network access: Do not allow anonymous enumeration of SAM accounts and shares'; P = $lsa; V = 'RestrictAnonymous'; Op = 'eq'; E = 1; D = 0; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network access: Let Everyone permissions apply to anonymous users'; P = $lsa; V = 'EveryoneIncludesAnonymous'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'High' }
+        @{ A = 'SO'; N = 'Network access: Do not allow storage of passwords and credentials for network authentication'; P = $lsa; V = 'DisableDomainCreds'; Op = 'eq'; E = 1; D = 0; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Audit: Force audit policy subcategory settings to override audit policy category settings'; P = $lsa; V = 'SCENoApplyLegacyAuditPolicy'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network access: Restrict anonymous access to Named Pipes and Shares'; P = 'System\CurrentControlSet\Services\LanManServer\Parameters'; V = 'RestrictNullSessAccess'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Microsoft network server: Digitally sign communications (always)'; P = 'System\CurrentControlSet\Services\LanManServer\Parameters'; V = 'RequireSecuritySignature'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Microsoft network client: Digitally sign communications (always)'; P = 'System\CurrentControlSet\Services\LanmanWorkstation\Parameters'; V = 'RequireSecuritySignature'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network security: Minimum session security for NTLM SSP based clients'; P = $msv; V = 'NTLMMinClientSec'; Op = 'eq'; E = 537395200; D = $null; Ex = 'NTLMv2 + 128-bit (537395200)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network security: Minimum session security for NTLM SSP based servers'; P = $msv; V = 'NTLMMinServerSec'; Op = 'eq'; E = 537395200; D = $null; Ex = 'NTLMv2 + 128-bit (537395200)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network security: Allow LocalSystem NULL session fallback'; P = $msv; V = 'allownullsessionfallback'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic'; P = $msv; V = 'AuditReceivingNTLMTraffic'; Op = 'eq'; E = 2; D = $null; Ex = 'Enable auditing for all accounts (2)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network security: Restrict NTLM: Audit NTLM authentication in this domain'; P = $nl; V = 'AuditNTLMInDomain'; Op = 'eq'; E = 7; D = $null; Ex = 'Enable all (7)'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network security: LDAP client signing requirements'; P = 'System\CurrentControlSet\Services\LDAP'; V = 'LDAPClientIntegrity'; Op = 'ge'; E = 1; D = 1; Ex = 'Negotiate signing (1) lub wyżej'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network security: Configure encryption types allowed for Kerberos'; P = "$polSys\Kerberos\Parameters"; V = 'SupportedEncryptionTypes'; Op = 'aes'; E = 2147483640; D = $null; Ex = 'AES128 + AES256 (+ Future), bez DES i RC4'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Domain member: Digitally encrypt or sign secure channel data (always)'; P = $nl; V = 'RequireSignOrSeal'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'High' }
+        @{ A = 'SO'; N = 'Domain member: Require strong (Windows 2000 or later) session key'; P = $nl; V = 'RequireStrongKey'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Domain controller: Refuse machine account password changes'; P = $nl; V = 'RefusePasswordChange'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Interactive logon: Machine inactivity limit'; P = $polSys; V = 'InactivityTimeoutSecs'; Op = 'le-nz'; E = 900; D = $null; Ex = '1-900 s'; S = 'Low' }
+        @{ A = 'SO'; N = 'User Account Control: Admin Approval Mode for the Built-in Administrator account'; P = $polSys; V = 'FilterAdministratorToken'; Op = 'eq'; E = 1; D = 0; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'SO'; N = 'User Account Control: Run all administrators in Admin Approval Mode'; P = $polSys; V = 'EnableLUA'; Op = 'eq'; E = 1; D = 1; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'WDigest Authentication (hasła jawnym tekstem w pamięci LSASS)'; P = "$($lsa -replace 'Lsa$','SecurityProviders\WDigest')"; V = 'UseLogonCredential'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'High' }
+        @{ A = 'AT'; N = 'Configure LSASS to run as a protected process (LSA Protection)'; P = $lsa; V = 'RunAsPPL'; Op = 'ge'; E = 1; D = $null; Ex = 'Enabled (1 z blokadą UEFI)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'Turn off multicast name resolution (LLMNR)'; P = 'Software\Policies\Microsoft\Windows NT\DNSClient'; V = 'EnableMulticast'; Op = 'eq'; E = 0; D = $null; Ex = 'Enabled (0 = LLMNR wyłączony)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'NetBT NodeType configuration'; P = 'System\CurrentControlSet\Services\NetBT\Parameters'; V = 'NodeType'; Op = 'eq'; E = 2; D = $null; Ex = 'P-node (2)'; S = 'Low' }
+        @{ A = 'AT'; N = 'Enable insecure guest logons (klient SMB)'; P = 'Software\Policies\Microsoft\Windows\LanmanWorkstation'; V = 'AllowInsecureGuestAuth'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'Allow Print Spooler to accept client connections'; P = 'Software\Policies\Microsoft\Windows NT\Printers'; V = 'RegisterSpoolerRemoteRpcEndPoint'; Op = 'eq'; E = 2; D = $null; Ex = 'Disabled (2)'; S = 'Low' }
+        @{ A = 'AT'; N = 'Encryption Oracle Remediation (CredSSP)'; P = "$polSys\CredSSP\Parameters"; V = 'AllowEncryptionOracle'; Op = 'eq'; E = 0; D = $null; Ex = 'Force Updated Clients (0)'; S = 'Low' }
+        @{ A = 'AT'; N = 'RDP: Require user authentication for remote connections by using NLA'; P = $ts; V = 'UserAuthentication'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'AT'; N = 'RDP: Do not allow passwords to be saved'; P = $ts; V = 'DisablePasswordSaving'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'AT'; N = 'WinRM Service: Allow Basic authentication'; P = "$winrm\Service"; V = 'AllowBasic'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'WinRM Service: Allow unencrypted traffic'; P = "$winrm\Service"; V = 'AllowUnencryptedTraffic'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'WinRM Client: Allow Basic authentication'; P = "$winrm\Client"; V = 'AllowBasic'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'WinRM Client: Allow unencrypted traffic'; P = "$winrm\Client"; V = 'AllowUnencryptedTraffic'; Op = 'eq'; E = 0; D = 0; Ex = 'Disabled (0)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'Turn on PowerShell Script Block Logging'; P = 'Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'; V = 'EnableScriptBlockLogging'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Medium' }
+        @{ A = 'AT'; N = 'Include command line in process creation events'; P = "$polSys\Audit"; V = 'ProcessCreationIncludeCmdLine_Enabled'; Op = 'eq'; E = 1; D = $null; Ex = 'Enabled (1)'; S = 'Low' }
+        @{ A = 'AT'; N = 'Security event log: Maximum log size (KB)'; P = "$evl\Security"; V = 'MaxSize'; Op = 'ge'; E = 196608; D = $null; Ex = '≥ 196608 KB'; S = 'Medium' }
+        @{ A = 'AT'; N = 'Application event log: Maximum log size (KB)'; P = "$evl\Application"; V = 'MaxSize'; Op = 'ge'; E = 32768; D = $null; Ex = '≥ 32768 KB'; S = 'Low' }
+        @{ A = 'AT'; N = 'System event log: Maximum log size (KB)'; P = "$evl\System"; V = 'MaxSize'; Op = 'ge'; E = 32768; D = $null; Ex = '≥ 32768 KB'; S = 'Low' }
+        @{ A = 'AT'; N = 'Turn off Autoplay (wszystkie napędy)'; P = 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'; V = 'NoDriveTypeAutoRun'; Op = 'eq'; E = 255; D = $null; Ex = 'All drives (255)'; S = 'Low' }
+    )
+    # E: 1 = Success, 2 = Failure, 3 = oba; G = początek GUID podkategorii (reszta: -69ae-11d9-bed3-505054503030)
+    $cisAudit = @(
+        @{ G = '0cce923f'; N = 'Account Logon: Credential Validation'; E = 3; S = 'Medium' }
+        @{ G = '0cce9242'; N = 'Account Logon: Kerberos Authentication Service'; E = 3; S = 'Medium' }
+        @{ G = '0cce9240'; N = 'Account Logon: Kerberos Service Ticket Operations'; E = 3; S = 'Medium' }
+        @{ G = '0cce9235'; N = 'Account Management: User Account Management'; E = 3; S = 'Medium' }
+        @{ G = '0cce9237'; N = 'Account Management: Security Group Management'; E = 1; S = 'Medium' }
+        @{ G = '0cce9236'; N = 'Account Management: Computer Account Management'; E = 1; S = 'Low' }
+        @{ G = '0cce9238'; N = 'Account Management: Distribution Group Management'; E = 1; S = 'Low' }
+        @{ G = '0cce923a'; N = 'Account Management: Other Account Management Events'; E = 1; S = 'Low' }
+        @{ G = '0cce922b'; N = 'Detailed Tracking: Process Creation'; E = 1; S = 'Low' }
+        @{ G = '0cce9248'; N = 'Detailed Tracking: Plug and Play Events'; E = 1; S = 'Low' }
+        @{ G = '0cce923b'; N = 'DS Access: Directory Service Access'; E = 2; S = 'Low' }
+        @{ G = '0cce923c'; N = 'DS Access: Directory Service Changes'; E = 1; S = 'Medium' }
+        @{ G = '0cce9217'; N = 'Logon/Logoff: Account Lockout'; E = 2; S = 'Medium' }
+        @{ G = '0cce9249'; N = 'Logon/Logoff: Group Membership'; E = 1; S = 'Low' }
+        @{ G = '0cce9216'; N = 'Logon/Logoff: Logoff'; E = 1; S = 'Low' }
+        @{ G = '0cce9215'; N = 'Logon/Logoff: Logon'; E = 3; S = 'Medium' }
+        @{ G = '0cce921c'; N = 'Logon/Logoff: Other Logon/Logoff Events'; E = 3; S = 'Low' }
+        @{ G = '0cce921b'; N = 'Logon/Logoff: Special Logon'; E = 1; S = 'Medium' }
+        @{ G = '0cce922f'; N = 'Policy Change: Audit Policy Change'; E = 1; S = 'Medium' }
+        @{ G = '0cce9230'; N = 'Policy Change: Authentication Policy Change'; E = 1; S = 'Low' }
+        @{ G = '0cce9228'; N = 'Privilege Use: Sensitive Privilege Use'; E = 3; S = 'Low' }
+        @{ G = '0cce9210'; N = 'System: Security State Change'; E = 1; S = 'Low' }
+        @{ G = '0cce9211'; N = 'System: Security System Extension'; E = 1; S = 'Medium' }
+        @{ G = '0cce9212'; N = 'System: System Integrity'; E = 3; S = 'Low' }
+    )
+    # Allowed = dozwolone SID-y (pusta lista = nikt); Forbidden = zakazane; Required = wymagane. DA/EA dopuszczone obok Administrators.
+    $adm = @('S-1-5-32-544', "$dSid-512", "$dSid-519")
+    $cisRights = @(
+        @{ R = 'SeTrustedCredManAccessPrivilege'; N = 'Access Credential Manager as a trusted caller'; Allowed = @(); S = 'Medium' }
+        @{ R = 'SeTcbPrivilege'; N = 'Act as part of the operating system'; Allowed = @(); S = 'High' }
+        @{ R = 'SeCreateTokenPrivilege'; N = 'Create a token object'; Allowed = @(); S = 'High' }
+        @{ R = 'SeNetworkLogonRight'; N = 'Access this computer from the network'; Forbidden = @('S-1-1-0', 'S-1-5-7', 'S-1-5-32-546', 'S-1-5-32-554'); S = 'Low' }
+        @{ R = 'SeMachineAccountPrivilege'; N = 'Add workstations to domain'; Allowed = $adm; S = 'Medium' }
+        @{ R = 'SeInteractiveLogonRight'; N = 'Allow log on locally'; Allowed = ($adm + 'S-1-5-9'); S = 'Medium' }
+        @{ R = 'SeRemoteInteractiveLogonRight'; N = 'Allow log on through Remote Desktop Services'; Allowed = $adm; S = 'Medium' }
+        @{ R = 'SeBackupPrivilege'; N = 'Back up files and directories'; Allowed = $adm; S = 'Low' }
+        @{ R = 'SeRestorePrivilege'; N = 'Restore files and directories'; Allowed = $adm; S = 'Low' }
+        @{ R = 'SeDebugPrivilege'; N = 'Debug programs'; Allowed = $adm; S = 'Medium' }
+        @{ R = 'SeLoadDriverPrivilege'; N = 'Load and unload device drivers'; Allowed = $adm; S = 'Medium' }
+        @{ R = 'SeTakeOwnershipPrivilege'; N = 'Take ownership of files or other objects'; Allowed = $adm; S = 'Low' }
+        @{ R = 'SeEnableDelegationPrivilege'; N = 'Enable computer and user accounts to be trusted for delegation'; Allowed = $adm; S = 'Medium' }
+        @{ R = 'SeSecurityPrivilege'; N = 'Manage auditing and security log'; Allowed = $adm; S = 'Low' }
+        @{ R = 'SeDenyNetworkLogonRight'; N = 'Deny access to this computer from the network'; Required = @('S-1-5-32-546'); S = 'Low' }
+        @{ R = 'SeDenyInteractiveLogonRight'; N = 'Deny log on locally'; Required = @('S-1-5-32-546'); S = 'Low' }
+    )
+    $auditTxt = @{ 0 = 'brak'; 1 = 'Success'; 2 = 'Failure'; 3 = 'Success and Failure' }
+    $cisRows  = [System.Collections.Generic.List[object]]::new()
+
+    Invoke-Check 'CIS' {
+        $gpo = Get-DcGpoPolicy
+
+        # Cele oceny: przy -UseWinRM każdy DC osobno (rejestr + auditpol), inaczej jeden zestaw z GPO dla wszystkich DC
+        $targets = [System.Collections.Generic.List[object]]::new()
+        if ($UseWinRM) {
+            $paths = [string[]]@($cisReg | ForEach-Object { "$($_.P)|$($_.V)" })
+            foreach ($dc in $dcs) {
+                try {
+                    $r = Invoke-Command -ComputerName $dc.HostName -ErrorAction Stop -ArgumentList (, $paths) -ScriptBlock {
+                        param([string[]]$Paths)
+                        $reg = @{}
+                        foreach ($p in $Paths) {
+                            $k, $n = $p -split '\|', 2
+                            $item = Get-ItemProperty -LiteralPath "HKLM:\$k" -Name $n -ErrorAction SilentlyContinue
+                            if ($item) { $reg[$p] = $item.$n }
+                        }
+                        $aud = @(auditpol.exe /get /category:* /r | ConvertFrom-Csv | ForEach-Object { [pscustomobject]@{ G = $_.'Subcategory GUID'; S = $_.'Inclusion Setting' } })
+                        [pscustomobject]@{ Reg = $reg; Audit = $aud }
+                    }
+                    $targets.Add([pscustomobject]@{ DC = $dc.HostName; Tryb = 'WinRM'; Reg = $r.Reg; Audit = @($r.Audit) })
+                } catch {
+                    $targets.Add([pscustomobject]@{ DC = "$($dc.HostName) (GPO - WinRM niedostępny)"; Tryb = 'GPO'; Reg = $null; Audit = $null })
+                }
+            }
+        } else {
+            $targets.Add([pscustomobject]@{ DC = 'wszystkie DC (GPO)'; Tryb = 'GPO'; Reg = $null; Audit = $null })
+        }
+
+        foreach ($t in $targets) {
+            foreach ($c in $cisReg) {
+                if ($t.Tryb -eq 'WinRM') {
+                    $val = $t.Reg["$($c.P)|$($c.V)"]
+                    $src = if ($null -ne $val) { 'rejestr DC (WinRM)' } else { 'nieustawione - wartość domyślna systemu' }
+                } else {
+                    $g = $gpo.Registry["$($c.P)\$($c.V)".ToLower()]
+                    $val = if ($g) { $g.Wartosc } else { $null }
+                    $src = if ($g) { $g.Zrodlo } else { 'brak w GPO - wartość domyślna systemu' }
+                }
+                $row = [pscustomobject]@{
+                    Ustawienie = $c.N; DC = $t.DC; Obszar = $(if ($c.A -eq 'SO') { 'Opcje zabezpieczeń' } else { 'Szablony administracyjne' })
+                    Oczekiwane = $c.Ex; Aktualne = $(if ($null -ne $val) { "$val" } elseif ($null -ne $c.D) { "nieustawione (domyślnie $($c.D))" } else { 'nieustawione' })
+                    Zrodlo = $src; Waga = $c.S; Zgodne = $(if (Test-CisValue $val $c) { 'Tak' } else { 'Nie' })
+                }
+                $cisRows.Add($row)
+            }
+            foreach ($a in $cisAudit) {
+                $guid = "$($a.G)-69ae-11d9-bed3-505054503030"
+                if ($t.Tryb -eq 'WinRM') {
+                    $line = $t.Audit | Where-Object { "$($_.G)".Trim('{', '}').ToLower() -eq $guid } | Select-Object -First 1
+                    $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
+                    $src = 'auditpol (WinRM)'
+                } else {
+                    $g = $gpo.Audit[$guid]
+                    $val = if ($g) { $g.Wartosc } else { $null }
+                    $src = if ($g) { $g.Zrodlo } elseif ($gpo.Audit.Count) { 'brak w GPO' } else { 'brak zaawansowanych zasad audytu w GPO' }
+                }
+                $row = [pscustomobject]@{
+                    Ustawienie = $a.N; DC = $t.DC; Obszar = 'Zasady audytu'
+                    Oczekiwane = $auditTxt[$a.E]; Aktualne = $(if ($null -ne $val) { $auditTxt[[int]$val] } else { 'nieustawione' })
+                    Zrodlo = $src; Waga = $a.S; Zgodne = $(if ($null -ne $val -and (([int]$val -band $a.E) -eq $a.E)) { 'Tak' } else { 'Nie' })
+                }
+                $cisRows.Add($row)
+            }
+        }
+
+        foreach ($c in $cisRights) {
+            $g = $gpo.Rights[$c.R]
+            $exp = if ($c.ContainsKey('Allowed')) { if ($c.Allowed.Count) { 'tylko: ' + (($c.Allowed | ForEach-Object { Resolve-SidName $_ }) -join ', ') } else { 'nikt' } }
+                   elseif ($c.ContainsKey('Forbidden')) { 'bez: ' + (($c.Forbidden | ForEach-Object { Resolve-SidName $_ }) -join ', ') }
+                   else { 'zawiera: ' + (($c.Required | ForEach-Object { Resolve-SidName $_ }) -join ', ') }
+            if (-not $g) {
+                $ok  = if ($c.ContainsKey('Allowed') -and $c.Allowed.Count -eq 0) { 'Tak' } else { 'nie oceniono' }
+                $cur = 'brak w GPO'; $src = 'brak w GPO - wartość domyślna systemu'
+            } else {
+                $sids = @($g.Wartosc)
+                $bad  = @()
+                if ($c.ContainsKey('Allowed'))   { $bad += @($sids | Where-Object { $_ -notin $c.Allowed }) }
+                if ($c.ContainsKey('Forbidden')) { $bad += @($sids | Where-Object { $_ -in $c.Forbidden }) }
+                $miss = @(); if ($c.ContainsKey('Required')) { $miss = @($c.Required | Where-Object { $_ -notin $sids }) }
+                $ok  = if ($bad.Count -eq 0 -and $miss.Count -eq 0) { 'Tak' } else { 'Nie' }
+                $cur = if ($sids.Count) { ($sids | ForEach-Object { Resolve-SidName $_ }) -join ', ' } else { '(nikt)' }
+                $src = $g.Zrodlo
+            }
+            $row = [pscustomobject]@{
+                Ustawienie = "$($c.N) ($($c.R))"; DC = 'wszystkie DC (GPO)'; Obszar = 'Przypisanie praw użytkowników'
+                Oczekiwane = $exp; Aktualne = $cur; Zrodlo = $src; Waga = $c.S; Zgodne = $ok
+            }
+            $cisRows.Add($row)
+        }
+
+        $fail  = @($cisRows | Where-Object Zgodne -eq 'Nie')
+        $regF  = @($fail | Where-Object { $_.Obszar -in 'Opcje zabezpieczeń', 'Szablony administracyjne' })
+        $audF  = @($fail | Where-Object Obszar -eq 'Zasady audytu')
+        $rigF  = @($fail | Where-Object Obszar -eq 'Przypisanie praw użytkowników')
+        $gpoNote = if ($UseWinRM) { 'Wartości odczytano z rejestru i auditpol każdego DC (stan rzeczywisty).' } else { 'Wartości odczytano z GPO podlinkowanych do domeny i OU Domain Controllers (konfiguracja zamierzona); ustawienia lokalne DC mogą się różnić - dokładny stan daje -UseWinRM.' }
+
+        Add-IfAny @{
+            Id = 'DC-CIS-REG'; Category = $catCis; Severity = (Get-TopSeverity $regF)
+            Title = 'Opcje zabezpieczeń i szablony administracyjne DC niezgodne z CIS L1'
+            Objects = $regF
+            Description = "Ustawienia zabezpieczeń kontrolerów domeny odbiegają od CIS Benchmark (profil L1 dla DC): m.in. ochrona poświadczeń (WDigest, LSA Protection), podpisywanie SMB, szyfrowanie Kerberos, rozwiązywanie nazw (LLMNR), WinRM i logowanie PowerShell. $gpoNote"
+            Recommendation = 'Ustawienia wprowadzać w GPO podlinkowanym do OU Domain Controllers (nie w Default Domain Policy), etapami i po teście. Punktem wyjścia może być Microsoft Security Baseline dla DC (Security Compliance Toolkit). Zmiany SMB signing, Kerberos AES-only i LSA Protection wymagają wcześniejszej weryfikacji zgodności aplikacji.'
+            Fix = (Fx '# GPMC > GPO dla OU Domain Controllers > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options', '# oraz Administrative Templates (ścieżki: nazwy ustawień w kolumnie Ustawienie)', 'gpresult /h C:\Temp\dc-gpo.html   # na DC: zastosowane ustawienia')
+        }
+        Add-IfAny @{
+            Id = 'DC-CIS-AUDIT'; Category = $catCis; Severity = (Get-TopSeverity $audF)
+            Title = 'Zasady audytu DC niezgodne z CIS L1'
+            Objects = $audF
+            Description = "Brak audytu tych zdarzeń oznacza, że logowania, zmiany grup uprzywilejowanych, zmiany w AD i użycie uprawnień nie zostaną zarejestrowane - SIEM/SOC nie wykryje ataku, a analiza incydentu będzie niemożliwa. $gpoNote"
+            Recommendation = 'Skonfigurować Advanced Audit Policy Configuration w GPO dla OU Domain Controllers i włączyć "Audit: Force audit policy subcategory settings". Zwiększyć rozmiar dziennika Security i przekazywać zdarzenia do SIEM.'
+            Fix = (Fx '# GPMC > GPO dla OU Domain Controllers > Computer Configuration > Policies > Windows Settings > Security Settings > Advanced Audit Policy Configuration', 'auditpol /get /category:*   # na DC: stan rzeczywisty')
+            Mitre = 'T1562.002'
+        }
+        Add-IfAny @{
+            Id = 'DC-CIS-RIGHTS'; Category = $catCis; Severity = (Get-TopSeverity $rigF)
+            Title = 'Przypisanie praw użytkowników na DC niezgodne z CIS L1'
+            Objects = $rigF
+            Description = 'Prawa takie jak logowanie lokalne lub przez RDP na DC, ładowanie sterowników, kopia zapasowa/przywracanie plików czy debugowanie programów pozwalają przejąć kontroler domeny. Domyślna Default Domain Controllers Policy nadaje część z nich grupom operatorów (Account/Server/Print/Backup Operators).'
+            Recommendation = 'Ograniczyć prawa do Administrators zgodnie z kolumną Oczekiwane; grupy operatorów pozostawić puste. Zmieniać w GPO dla OU Domain Controllers.'
+            Fix = (Fx '# GPMC > Default Domain Controllers Policy (lub dedykowane GPO) > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > User Rights Assignment')
+            Mitre = 'T1078.002'
+        }
+        $evaluated = @($cisRows | Where-Object { $_.Zgodne -in 'Tak', 'Nie' })
+        $okCount   = @($evaluated | Where-Object Zgodne -eq 'Tak').Count
+        $pct       = if ($evaluated.Count) { [int](100 * $okCount / $evaluated.Count) } else { 0 }
+        Add-Finding @{
+            Id = 'DC-CIS-SUMMARY'; Category = $catCis; Severity = 'Info'
+            Title = "Zgodność DC z wybranymi kontrolami CIS L1: $okCount z $($evaluated.Count) ($pct%)"
+            Objects = $cisRows
+            Description = "Pełna lista sprawdzonych ustawień ze statusem. Kontrole wybrane na podstawie CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); nie jest to pełna ocena zgodności z CIS. $gpoNote"
+        }
+    }
+}
+#endregion
+
 #region ---------- kondycja domeny i replikacja ----------
 # Wszystko zwykłym kontem: metadane replikacji przez ADWS, SYSVOL przez SMB, czas przez NTP (w32tm), DNS przez resolver stacji.
 $healthUnk = [System.Collections.Generic.List[object]]::new()
@@ -1483,6 +1852,7 @@ foreach ($f in $sorted) {
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
 [void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
+[void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) - nie jest to pełna ocena zgodności z CIS. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, analizy uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
