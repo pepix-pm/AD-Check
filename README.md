@@ -61,16 +61,15 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 Repozytorium jest publiczne – token nie jest potrzebny. Wklej w PowerShellu na stacji w domenie klienta:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$adcheck = [scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1')).TrimStart([char]0xFEFF))
-& $adcheck -Klient KLIENT
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
 
-Kolejne uruchomienia w tej samej sesji: `& $adcheck -Klient KLIENT -UseWinRM` itd.
+Na starszych serwerach (2012 R2/2016) przy błędzie połączenia SSL/TLS najpierw:
+`[Net.ServicePointManager]::SecurityProtocol = 'Tls12'`
 
 Uwagi:
-- Zamiast `iex (irm ...)` używany jest `& ([scriptblock]::Create(...))` – tylko tak da się przekazać parametry (`-Klient`, `-UseWinRM`…). Działa niezależnie od ExecutionPolicy i nie zostawia pliku skryptu na dysku.
-- Treść jest dekodowana jawnie jako UTF-8 – Windows PowerShell bez tego psuje polskie znaki.
+- Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
+- `.TrimStart([char]0xFEFF)` usuwa znacznik BOM (plik musi go mieć, żeby PowerShell 5.1 z pliku poprawnie czytał polskie znaki). GitHub wysyła `charset=utf-8`, więc `irm` dekoduje polskie znaki poprawnie.
 - U klienta używaj konkretnej, sprawdzonej wersji: zamień `main` w adresie na tag, np. `v0.5`. `main` może zawierać zmiany jeszcze nieprzetestowane.
 - Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je ze stacji.
 - **Repozytorium jest publiczne** – tym bardziej obowiązuje zasada: żadnych nazw klientów, domen, kont ani wyników w repo.
