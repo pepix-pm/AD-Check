@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.13)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.14)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.13'
+$Version = '0.14'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -2382,6 +2382,9 @@ tr:nth-child(even) td{background:#FAFBFC}
 .meta{color:var(--muted);font-size:12px;margin-bottom:8px}
 .lbl{font-weight:600;color:var(--pbd);margin:12px 0 3px}
 pre{background:#1E2430;color:#E6E9EF;padding:10px 12px;border-radius:6px;overflow-x:auto;font-size:12px}
+.code{position:relative}.code pre{padding-right:84px}
+.cp{position:absolute;top:6px;right:6px;padding:3px 10px;font-size:11px;background:#2D3748;color:#E6E9EF;border:1px solid #4A5568;border-radius:5px}
+.cp:hover{background:var(--pbd);border-color:var(--pbd)}.cp.ok{background:var(--l);border-color:var(--l)}
 .note{color:var(--muted);font-size:12px}
 a{color:var(--pbd)}
 button{background:var(--pbd);color:#fff;border:0;padding:6px 12px;border-radius:6px;cursor:pointer}
@@ -2392,12 +2395,27 @@ footer img{height:18px;vertical-align:middle;margin-right:6px}
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body{background:#fff}.wrap{padding:0}
   header,section,.card{box-shadow:none;border:1px solid var(--line)}
-  button{display:none}section{break-inside:avoid-page}
+  button,.cp{display:none}section{break-inside:avoid-page}
 }
 </style>
 <script>
 function toggleAll(o){document.querySelectorAll('details').forEach(d=>d.open=o)}
 window.addEventListener('beforeprint',()=>toggleAll(true));
+// Przycisk "Kopiuj" przy każdym bloku kodu; zapasowo execCommand, gdy schowek API jest niedostępny (np. stary przeglądarka / file://)
+function copyText(t){
+  if(navigator.clipboard&&window.isSecureContext){return navigator.clipboard.writeText(t)}
+  return new Promise(function(ok,err){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';
+    document.body.appendChild(a);a.select();try{document.execCommand('copy')?ok():err()}catch(e){err(e)}document.body.removeChild(a)})
+}
+document.addEventListener('DOMContentLoaded',function(){
+  document.querySelectorAll('pre').forEach(function(p){
+    var w=document.createElement('div');w.className='code';p.parentNode.insertBefore(w,p);w.appendChild(p);
+    var b=document.createElement('button');b.type='button';b.className='cp';b.textContent='Kopiuj';
+    b.addEventListener('click',function(){copyText(p.innerText).then(function(){b.textContent='Skopiowano';b.classList.add('ok');
+      setTimeout(function(){b.textContent='Kopiuj';b.classList.remove('ok')},1500)},function(){b.textContent='Błąd kopiowania'})});
+    w.appendChild(b);
+  });
+});
 </script>
 '@
 

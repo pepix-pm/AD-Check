@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14 – 2026-11-06
+
+- Przycisk „Kopiuj” przy blokach z poleceniami naprawczymi w raporcie HTML (ukryty na wydruku).
+
 ## 0.13 – 2026-11-06
 
 - Wygląd raportu w identyfikacji PEPIX: logo z papieru firmowego (osadzone w HTML), kolory marki (#F59F00, #4299E1), spójna paleta wag i ocen, stopka, poprawiony wydruk (kolory zachowane).
