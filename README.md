@@ -4,10 +4,12 @@ Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **z
 
 ## Wymagania
 
-- Windows PowerShell 5.1 lub nowszy
+- Windows z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
 - Moduł RSAT `ActiveDirectory`
-- Stacja w domenie (lub z dostępem do LDAP, SMB/SYSVOL i TCP 445 kontrolerów domeny)
+- Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: AD Web Services (TCP 9389), SMB/SYSVOL (TCP 445)
 - Zwykłe konto domenowe; konto z uprawnieniami admina na DC tylko w trybie `-UseWinRM`
+
+Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz, z podpowiedzią instalacji modułu.
 
 ## Użycie
 
@@ -34,7 +36,7 @@ clear
 Repozytorium jest prywatne, więc pobranie wymaga tokenu. Użyj **fine-grained PAT** tylko do odczytu:
 GitHub → Settings → Developer settings → Fine-grained tokens → *Repository access: Only select repositories* → `AD-Check`, *Permissions: Contents = Read-only*, ważność np. 90 dni. Token trzymaj w Keeperze. Nigdy nie wklejaj go jako tekstu do polecenia – zostałby w historii PowerShella na serwerze klienta.
 
-Wklej w Windows PowerShell 5.1 na serwerze/stacji w domenie klienta:
+Wklej w PowerShellu na serwerze/stacji w domenie klienta:
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -51,8 +53,8 @@ Kolejne uruchomienia w tej samej sesji: `& $adcheck -Klient KLIENT -UseWinRM` it
 
 Uwagi:
 - Zamiast `iex (irm ...)` używany jest `& ([scriptblock]::Create(...))` – tylko tak da się przekazać parametry (`-Klient`, `-UseWinRM`…). Działa niezależnie od ExecutionPolicy i nie zostawia pliku skryptu na dysku.
-- Treść jest dekodowana jawnie jako UTF-8 – PowerShell 5.1 bez tego psuje polskie znaki.
-- Konkretną wersję zamiast `main` pobierzesz, dopisując `?ref=v0.3` do adresu.
+- Treść jest dekodowana jawnie jako UTF-8 – Windows PowerShell bez tego psuje polskie znaki.
+- Konkretną wersję zamiast `main` pobierzesz, dopisując `?ref=v0.4` do adresu.
 - Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je z serwera klienta.
 
 ## Wyniki

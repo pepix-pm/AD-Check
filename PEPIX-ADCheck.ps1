@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.2)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.4)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -31,23 +31,52 @@ param(
     [int]$MaxRows = 500
 )
 
-# Bez #Requires i z ręcznym ustaleniem OutDir - skrypt musi działać także jako scriptblock (iex z GitHuba),
-# gdzie #Requires nie jest obsługiwane, a $PSScriptRoot jest pusty.
 $ErrorActionPreference = 'Stop'
-if ($PSVersionTable.PSVersion.Major -lt 5) { throw 'Wymagany Windows PowerShell 5.1 lub nowszy.' }
-if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    throw 'Brak modułu ActiveDirectory (RSAT). Serwer: Install-WindowsFeature RSAT-AD-PowerShell; Windows 10/11: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
+$Version = '0.4'
+
+#region ---------- wymagania ----------
+# Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
+# Wszystkie braki zbierane naraz, żeby nie poprawiać ich pojedynczo.
+$braki = [System.Collections.Generic.List[string]]::new()
+
+if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
+    $braki.Add('System inny niż Windows - moduł ActiveDirectory, SYSVOL i testy DC wymagają Windows.')
 }
-Import-Module ActiveDirectory
+if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+    $hint = 'Windows 10/11: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
+    try {
+        if ((Get-CimInstance Win32_OperatingSystem -Verbose:$false).ProductType -ne 1) { $hint = 'serwer: Install-WindowsFeature RSAT-AD-PowerShell' }
+    } catch { $hint = "serwer: Install-WindowsFeature RSAT-AD-PowerShell; $hint" }
+    $braki.Add("Brak modułu ActiveDirectory (RSAT). Instalacja - $hint")
+}
+if (-not $Server) {
+    $braki.Add('Nie ustalono domeny: stacja/konto poza domeną. Podaj -Server <domena lub DC>.')
+}
+if ($Previous -and -not (Test-Path -LiteralPath $Previous -PathType Leaf)) {
+    $braki.Add("Nie znaleziono pliku -Previous: $Previous")
+}
+
+if ($braki.Count -eq 0) {
+    Import-Module ActiveDirectory -Verbose:$false
+    try { $domain = Get-ADDomain -Server $Server }
+    catch {
+        $braki.Add("Brak połączenia z AD ($Server): $($_.Exception.Message). Wymagany dostęp do usługi AD Web Services na DC (TCP 9389) oraz DNS domeny.")
+    }
+}
+if ($braki.Count -gt 0) {
+    throw ("Niespełnione wymagania PEPIX AD-Check:`n - " + ($braki -join "`n - "))
+}
+
 if (-not $OutDir) {
-    # z pliku: obok skryptu; z iex: profil użytkownika (nie bieżący katalog - w sesji admina to często System32)
+    # z pliku: obok skryptu; z GitHuba: profil użytkownika (nie bieżący katalog - w sesji admina to często System32)
     $OutDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'raporty' } else { Join-Path $env:USERPROFILE 'PEPIX-ADCheck\raporty' }
 }
-$Version = '0.3'
+# Pliki wynikowe z BOM (Excel i przeglądarki poprawnie pokazują polskie znaki); w PS 6+ 'UTF8' oznacza UTF-8 bez BOM
+$encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
+#endregion
 
 $now      = Get-Date
 $staleDt  = $now.AddDays(-$StaleDays)
-$domain   = Get-ADDomain -Server $Server
 $forest   = Get-ADForest -Server $Server
 $rootDse  = Get-ADRootDSE -Server $Server
 $dSid     = $domain.DomainSID.Value
@@ -816,10 +845,10 @@ $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DN
 
 [ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts } } |
-    ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding UTF8
+    ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
 $sorted | Select-Object Id, Category, Severity, Title, Count, Recommendation, Mitre |
-    Export-Csv "$base.csv" -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
     foreach ($o in $f.Objects) {
@@ -832,7 +861,7 @@ $objRows = foreach ($f in $sorted) {
         }
     }
 }
-if ($objRows) { @($objRows) | Export-Csv "$base`_obiekty.csv" -NoTypeInformation -Encoding UTF8 -Delimiter ';' }
+if ($objRows) { @($objRows) | Export-Csv "$base`_obiekty.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
 
 # --- HTML ---
 function HtmlEnc([string]$s) { [System.Net.WebUtility]::HtmlEncode($s) }
@@ -962,7 +991,7 @@ foreach ($f in $sorted) {
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe i wymagają weryfikacji oraz zgłoszenia zmiany przed wykonaniem.')
 [void]$sb.Append('</p></section></div>')
 
-ConvertTo-Html -Head $css -Title "AD $Klient $($now.ToString('yyyy-MM-dd'))" -Body $sb.ToString() | Set-Content "$base.html" -Encoding UTF8
+ConvertTo-Html -Head $css -Title "AD $Klient $($now.ToString('yyyy-MM-dd'))" -Body $sb.ToString() | Set-Content "$base.html" -Encoding $encOut
 #endregion
 
 Write-Host "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score | Testy DC: $dcMethod" -ForegroundColor Cyan
