@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.9)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.10)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -11,7 +11,8 @@
       - podpisywanie LDAP, channel binding, poziom NTLM: odczyt GPO z SYSVOL (GptTmpl.inf).
     -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga admina na DC).
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
-    Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; im mniej, tym lepiej.
+    Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
+    wynik ogólny = najgorszy obszar, poziom dojrzałości 1-5; im mniej punktów, tym lepiej.
 
 .EXAMPLE
     .\PEPIX-ADCheck.ps1 -Klient KLIENT
@@ -32,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.9'
+$Version = '0.10'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -201,9 +202,98 @@ function ConvertTo-OsRow($x) {
         Add-Member -NotePropertyName KoniecWsparcia -NotePropertyValue (Format-Date $x.L.Koniec) -PassThru
 }
 
+# ---------- katalog reguł: obszar ryzyka, model, test źródłowy ----------
+# O: S = obiekty nieaktualne, P = konta uprzywilejowane, T = zaufania, A = anomalie (wynik 0-100 na obszar, wynik ogólny = najgorszy obszar)
+# M: model ryzyka (wiersz macierzy); C: nazwa Invoke-Check (DC-PROBE = testy pojedynczych DC); W: wymaganie (DC = bez -SkipDCChecks, WinRM = -UseWinRM)
+# N: reguła nie dotyczy, gdy wystąpi wskazane znalezisko; T: krótki opis do listy sprawdzonych reguł
+# Nowy test = nowy wpis tutaj (inaczej trafi do obszaru Anomalie, modelu "Inne" i nie pojawi się na liście sprawdzonych reguł).
+$areaNames = [ordered]@{ S = 'Obiekty nieaktualne'; P = 'Konta uprzywilejowane'; T = 'Zaufania'; A = 'Anomalie' }
+$ruleCatalog = @(
+    @{ Id = 'U-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'USERS';        T = 'Aktywne konta użytkowników nieużywane' }
+    @{ Id = 'C-STALE';           O = 'S'; M = 'Nieaktywne konta';             C = 'COMPUTERS';    T = 'Aktywne konta komputerów nieużywane' }
+    @{ Id = 'U-PWDNOTREQ';       O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Flaga PASSWD_NOTREQD' }
+    @{ Id = 'U-REVERSIBLE';      O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Hasła przechowywane odwracalnie' }
+    @{ Id = 'U-PNE';             O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Zwykłe konta z hasłem bez wygasania' }
+    @{ Id = 'U-SIDHIST';         O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Konta z SIDHistory' }
+    @{ Id = 'U-GUEST';           O = 'S'; M = 'Konfiguracja kont';            C = 'USERS';        T = 'Włączone konto Gość' }
+    @{ Id = 'C-MAQ';             O = 'S'; M = 'Konfiguracja kont';            C = 'COMPUTERS';    T = 'MachineAccountQuota > 0' }
+    @{ Id = 'C-OS-EOL';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Komputery z systemem bez wsparcia' }
+    @{ Id = 'C-OS-W10';          O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 10 (poza LTSC)' }
+    @{ Id = 'C-OS-FEATURE';      O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Windows 11 w wersji bez wsparcia' }
+    @{ Id = 'C-OS-SOON';         O = 'S'; M = 'Przestarzałe systemy';         C = 'COMPUTERS';    T = 'Koniec wsparcia serwerów/LTSC w ciągu 12 mies.' }
+    @{ Id = 'DC-OS-EOL';         O = 'S'; M = 'Przestarzałe systemy';         C = 'DC-OS';        T = 'DC z systemem bez wsparcia' }
+    @{ Id = 'D-DFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny domeny < 2016' }
+    @{ Id = 'DC-PATCH-OLD';      O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'DC bez aktualnych poprawek' }
+    @{ Id = 'DC-PATCH-DIFF';     O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'DC'; T = 'Różny poziom poprawek DC' }
+    @{ Id = 'DC-REBOOT';         O = 'S'; M = 'Zarządzanie poprawkami';       C = 'DC-PATCH';     W = 'WinRM'; T = 'DC oczekujący na restart / długi uptime' }
+    @{ Id = 'U-DES';             O = 'S'; M = 'Przestarzałe protokoły';       C = 'USERS';        T = 'Konta z wymuszonym DES' }
+    @{ Id = 'D-KRB-DES';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'DES dopuszczony w konfiguracji Kerberos' }
+    @{ Id = 'D-KRB-NOAES';       O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      T = 'Konta bez kluczy AES' }
+    @{ Id = 'DC-KRB-DES-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos DES' }
+    @{ Id = 'DC-KRB-RC4-USED';   O = 'S'; M = 'Przestarzałe protokoły';       C = 'KRB-ENC';      W = 'WinRM'; T = 'Wydane bilety Kerberos RC4' }
+    @{ Id = 'DC-SMB1';           O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'SMBv1 na DC' }
+    @{ Id = 'DC-NTLMV1';         O = 'S'; M = 'Przestarzałe protokoły';       C = 'DC-PROBE';     W = 'DC'; T = 'DC akceptuje NTLMv1/LM' }
+    @{ Id = 'DC-REPL-FAIL';      O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Błędy replikacji AD' }
+    @{ Id = 'DC-REPL-STALE';     O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > 24 h' }
+    @{ Id = 'DC-REPL-TSL';       O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Replikacja nieudana > tombstone lifetime' }
+    @{ Id = 'D-SINGLEDC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'REPL';         T = 'Tylko jeden kontroler domeny' }
+    @{ Id = 'D-SYSVOL-FRS';      O = 'S'; M = 'Replikacja i kondycja';        C = 'SYSVOL-FRS';   T = 'SYSVOL na FRS' }
+    @{ Id = 'D-FSMO';            O = 'S'; M = 'Replikacja i kondycja';        C = 'FSMO';         T = 'Osierocone role FSMO' }
+    @{ Id = 'DC-MACHINEPWD';     O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-MACHINEPWD'; T = 'Stare hasło konta komputera DC' }
+    @{ Id = 'DC-PORTS';          O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Niedostępne usługi AD na DC' }
+    @{ Id = 'DC-SYSVOL-SHARE';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Brak udziału SYSVOL/NETLOGON' }
+    @{ Id = 'DC-TIME';           O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-NET';       W = 'DC'; T = 'Różnica czasu DC względem PDC' }
+    @{ Id = 'D-GPO-SYNC';        O = 'S'; M = 'Replikacja i kondycja';        C = 'GPO-SYNC';     W = 'DC'; T = 'GPO niespójne AD-SYSVOL' }
+    @{ Id = 'DC-DNS-SRV';        O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-DNS';       W = 'DC'; T = 'Brak rekordów SRV DC' }
+
+    @{ Id = 'P-DA-COUNT';        O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Ponad 5 członków Domain Admins' }
+    @{ Id = 'P-SchemaAdmins';    O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Schema Admins' }
+    @{ Id = 'P-AccountOperators'; O = 'P'; M = 'Grupy uprzywilejowane';       C = 'PRIV';         T = 'Niepusta grupa Account Operators' }
+    @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
+    @{ Id = 'P-PrintOperators';  O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Print Operators' }
+    @{ Id = 'P-BackupOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Backup Operators' }
+    @{ Id = 'P-PNE';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z hasłem bez wygasania' }
+    @{ Id = 'P-SPN';             O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini z SPN (Kerberoasting)' }
+    @{ Id = 'P-DELEG';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Admini bez ochrony przed delegacją' }
+    @{ Id = 'P-STALE';           O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Nieużywane konta uprzywilejowane' }
+    @{ Id = 'P-ADM500';          O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Stare hasło wbudowanego Administratora' }
+    @{ Id = 'U-ADMINCOUNT';      O = 'P'; M = 'Ochrona kont administratorów'; C = 'USERS';        T = 'Osierocone adminCount=1' }
+    @{ Id = 'U-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'USERS';        T = 'Użytkownicy z delegacją nieograniczoną' }
+    @{ Id = 'C-UNCONSTR';        O = 'P'; M = 'Delegacja';                    C = 'COMPUTERS';    T = 'Komputery z delegacją nieograniczoną' }
+    @{ Id = 'C-LAPS-READ-BROAD'; O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Hasła LAPS dla szerokich grup' }
+    @{ Id = 'C-LAPS-READABLE';   O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Konto przeglądu widzi hasła LAPS' }
+    @{ Id = 'C-LAPS-READERS';    O = 'P'; M = 'Dostęp do haseł LAPS';         C = 'LAPS-ACL';     N = 'C-LAPS-NONE'; T = 'Podmioty z dostępem do haseł LAPS' }
+    @{ Id = 'DC-CIS-RIGHTS';     O = 'P'; M = 'Prawa na kontrolerach domeny'; C = 'CIS';          W = 'DC'; T = 'Przypisanie praw użytkowników na DC' }
+
+    @{ Id = 'D-TRUST-SIDF';      O = 'T'; M = 'Filtrowanie SID';              C = 'DOMAIN';       T = 'Zaufania zewnętrzne bez filtrowania SID' }
+    @{ Id = 'D-KRB-TRUST';       O = 'T'; M = 'Szyfrowanie zaufań';           C = 'KRB-ENC';      T = 'Zaufania bez AES' }
+
+    @{ Id = 'P-KRBTGT';          O = 'A'; M = 'Golden Ticket';                C = 'PRIV';         T = 'Stare hasło krbtgt' }
+    @{ Id = 'C-LAPS-NONE';       O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    T = 'LAPS nie wdrożony' }
+    @{ Id = 'C-LAPS-MISSING';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Komputery bez LAPS' }
+    @{ Id = 'C-LAPS-EXPIRED';    O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Hasło LAPS przestało się zmieniać' }
+    @{ Id = 'C-LAPS-LEGACY';     O = 'A'; M = 'Pass-the-hash';                C = 'COMPUTERS';    N = 'C-LAPS-NONE'; T = 'Przestarzały Microsoft LAPS' }
+    @{ Id = 'U-ASREP';           O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta bez preautentykacji Kerberos' }
+    @{ Id = 'U-SPN';             O = 'A'; M = 'Łamanie haseł';                C = 'USERS';        T = 'Konta użytkowników z SPN' }
+    @{ Id = 'D-PWDLEN';          O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Minimalna długość hasła < 12' }
+    @{ Id = 'D-PWDCPLX';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Złożoność haseł wyłączona' }
+    @{ Id = 'D-LOCKOUT';         O = 'A'; M = 'Łamanie haseł';                C = 'DOMAIN';       T = 'Brak blokady konta' }
+    @{ Id = 'DC-SPOOLER';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Print Spooler na DC' }
+    @{ Id = 'DC-LDAPSIGN';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'Podpisywanie LDAP niewymagane' }
+    @{ Id = 'DC-LDAPCBT';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'LDAP channel binding niewymuszony' }
+    @{ Id = 'DC-CIS-AUDIT';      O = 'A'; M = 'Audyt';                        C = 'CIS';          W = 'DC'; T = 'Zasady audytu DC (CIS L1)' }
+    @{ Id = 'DC-CIS-REG';        O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia zabezpieczeń DC (CIS L1)' }
+    @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
+    @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
+)
+$ruleMeta = @{}
+foreach ($r in $ruleCatalog) { $ruleMeta[$r.Id] = $r }
+$sevLevel = @{ Critical = 1; High = 2; Medium = 3; Low = 4; Info = 5 }
+
 function Add-Finding([hashtable]$F) {
-    $obj = @($F.Objects | Where-Object { $_ })
-    $findings.Add([pscustomobject]@{
+    $obj  = @($F.Objects | Where-Object { $_ })
+    $rule = $ruleMeta[$F.Id]
+    $row  = [pscustomobject]@{
         Id             = $F.Id
         Category       = $F.Category
         Severity       = $F.Severity
@@ -213,8 +303,12 @@ function Add-Finding([hashtable]$F) {
         Recommendation = [string]$F.Recommendation
         Fix            = [string]$F.Fix
         Mitre          = [string]$F.Mitre
+        Obszar         = $(if ($F.Severity -eq 'Info') { 'Informacje' } elseif ($rule) { $areaNames[$rule.O] } else { $areaNames['A'] })
+        Model          = $(if ($rule) { $rule.M } else { 'Inne' })
+        Poziom         = $sevLevel[$F.Severity]
         Objects        = $obj
-    })
+    }
+    $findings.Add($row)
 }
 
 # Dodaje znalezisko tylko, gdy są obiekty
@@ -1889,7 +1983,6 @@ Add-IfAny @{
 $sevOrder = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
 $sorted   = @($findings | Sort-Object { $sevOrder[$_.Severity] }, Category, Id)
 $real     = @($sorted | Where-Object Severity -ne 'Info')
-$score    = [int](($findings | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum)
 $sevCount = @{}
 foreach ($s in 'Critical','High','Medium','Low') { $sevCount[$s] = @($real | Where-Object Severity -eq $s).Count }
 
@@ -1904,6 +1997,48 @@ $summary = @($real | Group-Object Category | ForEach-Object {
         Punkty    = [int](($g | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum)
     }
 } | Sort-Object Punkty -Descending)
+
+# Wynik w czterech obszarach ryzyka (0-100, suma punktów znalezisk obszaru, z limitem 100); wynik ogólny = najgorszy obszar
+$areaScore = [ordered]@{}
+foreach ($k in $areaNames.Keys) {
+    $n = $areaNames[$k]
+    $areaScore[$n] = [Math]::Min(100, [int](($real | Where-Object Obszar -eq $n | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum))
+}
+$score    = [int](($areaScore.Values | Measure-Object -Maximum).Maximum)
+# Poziom dojrzałości 1-5: najniższy poziom wśród znalezisk (Critical = 1 ... Low = 4); brak znalezisk = 5
+$maturity = if ($real.Count) { [int](($real | ForEach-Object { $_.Poziom } | Measure-Object -Minimum).Minimum) } else { 5 }
+$maturityTxt = @{ 1 = 'krytyczne luki - natychmiastowe działania'; 2 = 'poważne luki - pilny plan naprawy'; 3 = 'podstawowe zabezpieczenia - wymagane usprawnienia'
+                  4 = 'dobry poziom - drobne usprawnienia'; 5 = 'brak wykrytych problemów w zakresie testów' }
+
+# Status każdej reguły z katalogu (lista sprawdzonych reguł w raporcie)
+$errChecks = @($findings | Where-Object { $_.Id -like 'ERR-*' } | ForEach-Object { $_.Id.Substring(4) })
+$probeErr  = ($errChecks -contains 'DC-GPO') -or (@($dcs | Where-Object { $errChecks -contains "DC-$($_.Name)" }).Count -gt 0)
+$foundIds  = @($real | ForEach-Object { $_.Id })
+$ruleStatus = @(foreach ($r in $ruleCatalog) {
+    $f  = $real | Where-Object Id -eq $r.Id | Select-Object -First 1
+    $st = if ($f) { 'Znalezisko' }
+          elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
+          elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
+          elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
+          elseif ($r.N -and ($foundIds -contains $r.N)) { 'Nie dotyczy' }
+          else { 'Zaliczony' }
+    [pscustomobject]@{
+        Id = $r.Id; Obszar = $areaNames[$r.O]; Model = $r.M; Test = $r.T; Status = $st
+        Waga = $(if ($f) { $f.Severity } else { '' }); Punkty = $(if ($f) { $weights[$f.Severity] } else { 0 })
+    }
+})
+
+# Macierz ryzyka: obszar x model, punkty znalezisk
+$matrix = @(foreach ($k in $areaNames.Keys) {
+    $n = $areaNames[$k]
+    $models = @($ruleCatalog | Where-Object { $_.O -eq $k } | ForEach-Object { $_.M } | Select-Object -Unique)
+    if (@($real | Where-Object { $_.Obszar -eq $n -and $_.Model -eq 'Inne' }).Count) { $models += 'Inne' }
+    foreach ($m in $models) {
+        $g = @($real | Where-Object { $_.Obszar -eq $n -and $_.Model -eq $m })
+        [pscustomobject]@{ Obszar = $n; Model = $m; Znaleziska = $g.Count
+                           Punkty = [int](($g | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum) }
+    }
+})
 
 $diff = $null
 if ($Previous) {
@@ -1923,6 +2058,8 @@ $meta = [ordered]@{
     Domena    = $domain.DNSRoot
     Data      = $now.ToString('s')
     Wynik     = $score
+    Obszary   = $areaScore
+    Dojrzalosc = $maturity
     Wersja    = $Version
     DC        = @($dcs.HostName)
     Uruchomil = "$env:USERDOMAIN\$env:USERNAME"
@@ -1960,12 +2097,12 @@ $invTrusts = @($trusts | ForEach-Object {
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
-[ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted
+[ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
-$sorted | Select-Object Id, Category, Severity, Title, Count, Recommendation, Mitre |
+$sorted | Select-Object Id, Obszar, Model, Poziom, Category, Severity, Title, Count, Recommendation, Mitre |
     Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
@@ -2015,6 +2152,19 @@ header p{margin:2px 0;opacity:.9}
 .cards{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}
 .card{background:#fff;border-radius:8px;padding:14px 18px;flex:1;min-width:140px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 .card .v{font-size:28px;font-weight:700}
+.card .of{font-size:13px;color:#888;font-weight:400;margin-left:2px}
+.card.big .v{font-size:36px}
+.card.r0 .v{color:#2e7d32}.card.r1 .v{color:#b58900}.card.r2 .v{color:var(--h)}.card.r3 .v{color:var(--c)}
+.card.lvl1 .v{color:var(--c)}.card.lvl2 .v{color:var(--h)}.card.lvl3 .v{color:#b58900}.card.lvl4 .v,.card.lvl5 .v{color:#2e7d32}
+.card.area .k{font-weight:600;color:var(--n);font-size:13px}
+.bar{height:8px;background:#eef2f7;border-radius:4px;margin-top:6px;overflow:hidden}.bar span{display:block;height:100%}
+.r0{background:#c8e6c9}.r1{background:#fff59d}.r2{background:#ffcc80}.r3{background:#ef9a9a}
+.bar .r0{background:#43a047}.bar .r1{background:#fbc02d}.bar .r2{background:var(--h)}.bar .r3{background:var(--c)}
+.matrix{display:flex;gap:10px;flex-wrap:wrap}.mcol{flex:1;min-width:220px}
+.mh{font-weight:600;color:var(--n);padding:6px 8px;border-bottom:2px solid var(--n);margin-bottom:4px}.mh b{float:right}
+.mc{display:flex;justify-content:space-between;gap:8px;padding:5px 8px;margin:3px 0;border-radius:4px;font-size:12px}
+.st{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.st-ok{background:#c8e6c9;color:#1b5e20}.st-bad{background:#ef9a9a;color:#7f0000}.st-err{background:#ffcc80;color:#6d3a00}.st-na{background:#e0e0e0;color:#444}
 .card .k{color:#666;font-size:12px}
 section{background:#fff;border-radius:8px;padding:18px 20px;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 h2{color:var(--n);margin-top:0;font-size:18px}
@@ -2048,8 +2198,17 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.Append("<p><b>Wykonał:</b> $(HtmlEnc $meta.Uruchomil) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; PEPIX AD-Check $Version</p>")
 [void]$sb.Append('<div class="conf">DOKUMENT POUFNY - zawiera informacje o podatnościach infrastruktury klienta</div></header>')
 
+function Get-ScoreClass([int]$Points) { if ($Points -ge 30) { 'r3' } elseif ($Points -ge 10) { 'r2' } elseif ($Points -ge 1) { 'r1' } else { 'r0' } }
+function Get-MitreLink([string]$Id) {
+    if (-not $Id) { return '' }
+    $p = $Id -split '\.'
+    $u = "https://attack.mitre.org/techniques/$($p[0])/" + $(if ($p.Count -gt 1) { "$($p[1])/" } else { '' })
+    "<a href=`"$u`" target=`"_blank`">$(HtmlEnc $Id)</a>"
+}
+
 [void]$sb.Append('<div class="cards">')
-[void]$sb.Append("<div class=`"card`"><div class=`"v`">$score</div><div class=`"k`">Wynik (im mniej, tym lepiej)</div></div>")
+[void]$sb.Append("<div class=`"card big $(Get-ScoreClass $score)`"><div class=`"v`">$score<span class=`"of`">/100</span></div><div class=`"k`">Wynik ogólny (najgorszy obszar; im mniej, tym lepiej)</div></div>")
+[void]$sb.Append("<div class=`"card big lvl$maturity`"><div class=`"v`">$maturity<span class=`"of`">/5</span></div><div class=`"k`">Poziom dojrzałości: $(HtmlEnc $maturityTxt[$maturity])</div></div>")
 foreach ($s in 'Critical','High','Medium','Low') {
     [void]$sb.Append("<div class=`"card`"><div class=`"v`">$($sevCount[$s])</div><div class=`"k`">$(Badge $s)</div></div>")
 }
@@ -2060,6 +2219,11 @@ if ($diff) {
     if ($pd.Length -ge 10) { $pd = $pd.Substring(0, 10) }
     [void]$sb.Append("<div class=`"card`"><div class=`"v`">$sign</div><div class=`"k`">Zmiana od $(HtmlEnc $pd) (było $($diff.PoprzedniWynik))</div></div>")
 }
+[void]$sb.Append('</div><div class="cards">')
+foreach ($a in $areaScore.Keys) {
+    $v = $areaScore[$a]
+    [void]$sb.Append("<div class=`"card area`"><div class=`"k`">$(HtmlEnc $a)</div><div class=`"v`">$v<span class=`"of`">/100</span></div><div class=`"bar`"><span class=`"$(Get-ScoreClass $v)`" style=`"width:$([Math]::Max($v, 2))%`"></span></div></div>")
+}
 [void]$sb.Append('</div>')
 
 if ($diff) {
@@ -2067,13 +2231,24 @@ if ($diff) {
     [void]$sb.Append("<p><b>Nowe znaleziska:</b> $(HtmlEnc (($diff.Nowe) -join ', '))</p><p><b>Usunięte (naprawione):</b> $(HtmlEnc (($diff.Usuniete) -join ', '))</p></section>")
 }
 
+[void]$sb.Append('<section><h2>Macierz ryzyka</h2><p class="note">Punkty znalezisk w podziale na obszary i rodzaje ryzyka. Zielone - brak problemów, żółte 1-9 pkt, pomarańczowe 10-29 pkt, czerwone 30+ pkt.</p><div class="matrix">')
+foreach ($a in $areaScore.Keys) {
+    [void]$sb.Append("<div class=`"mcol`"><div class=`"mh`">$(HtmlEnc $a) <b>$($areaScore[$a])</b></div>")
+    foreach ($c in @($matrix | Where-Object Obszar -eq $a)) {
+        $t = if ($c.Znaleziska) { "$($c.Punkty) pkt / $($c.Znaleziska) zn." } else { 'OK' }
+        [void]$sb.Append("<div class=`"mc $(Get-ScoreClass $c.Punkty)`"><span>$(HtmlEnc $c.Model)</span><span>$t</span></div>")
+    }
+    [void]$sb.Append('</div>')
+}
+[void]$sb.Append('</div></section>')
+
 [void]$sb.Append('<section><h2>Podsumowanie według kategorii</h2>')
 [void]$sb.Append((ConvertTo-HtmlTable $summary))
 [void]$sb.Append('</section>')
 
-[void]$sb.Append('<section><h2>Lista znalezisk</h2><div class="tw"><table><thead><tr><th>Waga</th><th>Znalezisko</th><th>Kategoria</th><th>Obiekty</th><th>MITRE ATT&amp;CK</th></tr></thead><tbody>')
+[void]$sb.Append('<section><h2>Lista znalezisk</h2><div class="tw"><table><thead><tr><th>Waga</th><th>Znalezisko</th><th>Obszar</th><th>Rodzaj ryzyka</th><th>Obiekty</th><th>Pkt</th><th>MITRE ATT&amp;CK</th></tr></thead><tbody>')
 foreach ($f in $real) {
-    [void]$sb.Append("<tr><td>$(Badge $f.Severity)</td><td><a href=`"#$(HtmlEnc $f.Id)`">$(HtmlEnc $f.Title)</a></td><td>$(HtmlEnc $f.Category)</td><td>$($f.Count)</td><td>$(HtmlEnc $f.Mitre)</td></tr>")
+    [void]$sb.Append("<tr><td>$(Badge $f.Severity)</td><td><a href=`"#$(HtmlEnc $f.Id)`">$(HtmlEnc $f.Title)</a></td><td>$(HtmlEnc $f.Obszar)</td><td>$(HtmlEnc $f.Model)</td><td>$($f.Count)</td><td>$($weights[$f.Severity])</td><td>$(Get-MitreLink $f.Mitre)</td></tr>")
 }
 [void]$sb.Append('</tbody></table></div></section>')
 
@@ -2081,8 +2256,8 @@ foreach ($f in $real) {
 foreach ($f in $sorted) {
     $sev = $f.Severity.ToLower()
     [void]$sb.Append("<section class=`"f $sev`" id=`"$(HtmlEnc $f.Id)`"><h3>$(Badge $f.Severity) $(HtmlEnc $f.Title)</h3>")
-    $mitre = if ($f.Mitre) { " &nbsp;|&nbsp; MITRE ATT&amp;CK: $(HtmlEnc $f.Mitre)" } else { '' }
-    [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity])$mitre</div>")
+    $mitre = if ($f.Mitre) { " &nbsp;|&nbsp; MITRE ATT&amp;CK: $(Get-MitreLink $f.Mitre)" } else { '' }
+    [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Obszar) / $(HtmlEnc $f.Model) &nbsp;|&nbsp; $(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity]) &nbsp;|&nbsp; Poziom dojrzałości: $($f.Poziom)$mitre</div>")
     if ($f.Description)    { [void]$sb.Append("<div class=`"lbl`">Ryzyko</div><div>$(HtmlEnc $f.Description)</div>") }
     if ($f.Recommendation) { [void]$sb.Append("<div class=`"lbl`">Zalecenie</div><div>$(HtmlEnc $f.Recommendation)</div>") }
     if ($f.Fix)            { [void]$sb.Append("<div class=`"lbl`">Przykładowa naprawa (do weryfikacji przed wykonaniem)</div><pre>$(HtmlEnc $f.Fix)</pre>") }
@@ -2095,6 +2270,16 @@ foreach ($f in $sorted) {
     [void]$sb.Append('</section>')
 }
 
+$stCls = @{ 'Znalezisko' = 'st-bad'; 'Zaliczony' = 'st-ok'; 'Błąd testu' = 'st-err' }
+$okRules = @($ruleStatus | Where-Object Status -eq 'Zaliczony').Count
+[void]$sb.Append("<section><h2>Sprawdzone reguły</h2><p class=`"note`">Zaliczone: $okRules z $($ruleStatus.Count). Reguły pominięte lub wymagające -UseWinRM nie zostały ocenione.</p><div class=`"tw`"><table><thead><tr><th>Status</th><th>ID</th><th>Obszar</th><th>Rodzaj ryzyka</th><th>Test</th><th>Pkt</th></tr></thead><tbody>")
+foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
+    $cls = if ($stCls.ContainsKey($r.Status)) { $stCls[$r.Status] } else { 'st-na' }
+    $idCell = if ($r.Status -eq 'Znalezisko') { "<a href=`"#$(HtmlEnc $r.Id)`">$(HtmlEnc $r.Id)</a>" } else { HtmlEnc $r.Id }
+    [void]$sb.Append("<tr><td><span class=`"st $cls`">$(HtmlEnc $r.Status)</span></td><td>$idCell</td><td>$(HtmlEnc $r.Obszar)</td><td>$(HtmlEnc $r.Model)</td><td>$(HtmlEnc $r.Test)</td><td>$($r.Punkty)</td></tr>")
+}
+[void]$sb.Append('</tbody></table></div></section>')
+
 [void]$sb.Append('<section><h2>Załącznik A. Inwentaryzacja domeny</h2>')
 [void]$sb.Append('<div class="lbl">Domena i polityki</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invDomain))
 [void]$sb.Append('<div class="lbl">Kontrolery domeny</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invDCs))
@@ -2106,6 +2291,7 @@ foreach ($f in $sorted) {
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
 [void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
+[void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) - nie jest to pełna ocena zgodności z CIS. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, analizy uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
@@ -2116,7 +2302,8 @@ foreach ($f in $sorted) {
 ConvertTo-Html -Head $css -Title "AD $Klient $($now.ToString('yyyy-MM-dd'))" -Body $sb.ToString() | Set-Content "$base.html" -Encoding $encOut
 #endregion
 
-Write-Host "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score | Testy DC: $dcMethod" -ForegroundColor Cyan
+Write-Host "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100 | Dojrzałość: $maturity/5 | Testy DC: $dcMethod" -ForegroundColor Cyan
+Write-Host (($areaScore.Keys | ForEach-Object { "$($_): $($areaScore[$_])" }) -join ' | ') -ForegroundColor Cyan
 $real | Format-Table Severity, Category, Title -AutoSize
 Write-Host "Raport: $base.html" -ForegroundColor Green
 Write-Host "Dane:   $base.json | $base.csv | $base`_obiekty.csv" -ForegroundColor Green

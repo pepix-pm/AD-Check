@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10 – 2026-11-06
+
+- Raport w układzie zbliżonym do PingCastle: wynik 0–100 w czterech obszarach ryzyka (obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie), wynik ogólny = najgorszy obszar, poziom dojrzałości 1–5, macierz ryzyka, lista sprawdzonych reguł ze statusem, linki MITRE ATT&CK.
+- Katalog reguł `$ruleCatalog`; znaleziska mają pola Obszar, Model, Poziom (JSON, CSV).
+- **Zmiana znaczenia `Meta.Wynik`:** wcześniej suma punktów bez limitu, teraz 0–100 (najgorszy obszar). Porównanie `-Previous` z raportem sprzed 0.10 pokazuje różnicę w innych jednostkach.
+
 ## 0.9 – 2026-11-06
 
 - Kerberos i szyfrowanie: DES w konfiguracji kont/komputerów/zaufań/KDC (D-KRB-DES), konta bez kluczy AES (D-KRB-NOAES), zaufania bez AES (D-KRB-TRUST); z `-UseWinRM` faktyczne bilety DES/RC4 z dziennika Security DC (DC-KRB-DES-USED, DC-KRB-RC4-USED).

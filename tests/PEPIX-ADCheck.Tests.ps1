@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
 
@@ -77,11 +77,20 @@ Describe 'ConvertFrom-AuditText' {
     }
 }
 
-Describe 'Format-EncTypes' {
+Describe 'Format-EncTypes', 'Get-ScoreClass' {
     It 'opisuje bity szyfrowania' {
         Format-EncTypes 24 | Should -Be '24 (AES128, AES256)'
         Format-EncTypes 7 | Should -Be '7 (DES-CRC, DES-MD5, RC4)'
         Format-EncTypes $null | Should -Match 'nieustawione'
+    }
+}
+
+Describe 'Get-ScoreClass' {
+    It 'progi kolorów' {
+        Get-ScoreClass 0 | Should -Be 'r0'
+        Get-ScoreClass 9 | Should -Be 'r1'
+        Get-ScoreClass 10 | Should -Be 'r2'
+        Get-ScoreClass 30 | Should -Be 'r3'
     }
 }
 

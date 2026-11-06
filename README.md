@@ -83,7 +83,15 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 - `.csv` – lista znalezisk
 - `_obiekty.csv` – wszystkie obiekty dla wszystkich znalezisk
 
-Punktacja: Critical = 25, High = 10, Medium = 3, Low = 1 za każde znalezisko. Im mniej, tym lepiej.
+### Punktacja i struktura raportu
+
+- Każde znalezisko: Critical = 25, High = 10, Medium = 3, Low = 1 pkt.
+- Znaleziska należą do jednego z **czterech obszarów ryzyka**: obiekty nieaktualne, konta uprzywilejowane, zaufania, anomalie. Wynik obszaru = suma punktów, maks. 100. **Wynik ogólny = najgorszy obszar** (0–100, im mniej, tym lepiej).
+- **Poziom dojrzałości 1–5** wynika z najpoważniejszego znaleziska (Critical = 1, High = 2, Medium = 3, Low = 4, brak = 5).
+- **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
+- **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu.
+
+Obszar, rodzaj ryzyka i test źródłowy każdej reguły są w katalogu `$ruleCatalog` w skrypcie. Układ raportu jest wzorowany na przeglądach typu PingCastle; teksty, identyfikatory i punktacja są własne PEPIX.
 
 > **Raporty zawierają informacje o podatnościach klienta.** Nie commituj ich do repozytorium (są w `.gitignore`) i przekazuj tylko szyfrowanym kanałem.
 
