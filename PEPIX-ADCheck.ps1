@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.11)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.12)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.11'
+$Version = '0.12'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -343,6 +343,92 @@ $complianceMap = @{
     'Kopia i odtwarzanie'          = @{ N = 'c';    I = '8.13' }
     'Inne'                         = @{ N = 'a';    I = '' }
 }
+
+# ---------- plan naprawczy: pracochłonność i etap ----------
+# Id -> @(godziny min, godziny max, etap, uwaga). Etap 1 = do 30 dni, 2 = 30-90 dni (wymaga testów), 3 = do 12 miesięcy (projekty).
+# Znalezisko Critical zawsze trafia do etapu 1. Godziny: przygotowanie, wdrożenie i weryfikacja w typowej domenie (do ok. 500 kont);
+# bez zakupów, licencji i migracji pojedynczych stacji. Szacunki do dostosowania do realnych czasów PEPIX.
+$planMeta = @{
+    'U-STALE'          = @(2, 4, 1, 'Lista do potwierdzenia z klientem przed wyłączeniem')
+    'C-STALE'          = @(1, 3, 1, '')
+    'U-PWDNOTREQ'      = @(1, 2, 1, '')
+    'U-REVERSIBLE'     = @(1, 2, 1, 'Po zmianie flagi wymusić zmianę hasła')
+    'U-PNE'            = @(2, 4, 2, 'Wymaga komunikacji do użytkowników')
+    'U-SIDHIST'        = @(2, 4, 2, 'Sprawdzić, czy migracja jest zakończona')
+    'U-GUEST'          = @(0.5, 1, 1, '')
+    'C-MAQ'            = @(1, 2, 1, 'Wcześniej delegować dołączanie komputerów na OU')
+    'C-OS-EOL'         = @(8, 40, 3, 'Projekt migracji; koszt zależy od liczby systemów')
+    'C-OS-W10'         = @(4, 16, 3, 'Plan migracji do Windows 11 lub ESU')
+    'C-OS-FEATURE'     = @(2, 6, 2, 'Sprawdzić TargetReleaseVersion i zatwierdzenia WSUS')
+    'C-OS-SOON'        = @(4, 8, 3, 'Plan migracji serwerów i budżet')
+    'DC-OS-EOL'        = @(8, 16, 3, 'Na każdy DC: nowy DC, przeniesienie ról, degradacja starego')
+    'D-DFL'            = @(2, 4, 3, 'Po wycofaniu starszych DC (DC-OS-EOL)')
+    'DC-PATCH-OLD'     = @(2, 4, 1, 'Restart DC po jednym, przy zdrowej replikacji')
+    'DC-PATCH-DIFF'    = @(1, 3, 1, '')
+    'DC-REBOOT'        = @(1, 2, 1, 'W oknie serwisowym')
+    'U-DES'            = @(1, 2, 1, '')
+    'D-KRB-DES'        = @(2, 4, 2, 'Najpierw sprawdzić użycie DES (DC-KRB-DES-USED, -UseWinRM)')
+    'D-KRB-NOAES'      = @(2, 6, 2, 'Konta usług - w uzgodnieniu z właścicielami aplikacji')
+    'DC-KRB-DES-USED'  = @(4, 8, 2, 'Identyfikacja systemów wymagających DES')
+    'DC-KRB-RC4-USED'  = @(8, 16, 2, 'Przygotowanie do wyłączenia RC4')
+    'DC-SMB1'          = @(2, 6, 2, 'Najpierw audyt dostępu SMB1')
+    'DC-NTLMV1'        = @(4, 12, 2, 'Najpierw audyt zdarzeń 4624 (NTLM V1)')
+    'DC-REPL-FAIL'     = @(2, 8, 1, '')
+    'DC-REPL-STALE'    = @(2, 8, 1, '')
+    'DC-REPL-TSL'      = @(4, 12, 1, 'Nie wymuszać replikacji - izolacja i ponowna promocja DC')
+    'D-SINGLEDC'       = @(6, 12, 2, 'Wymaga serwera/licencji na drugi DC')
+    'D-SYSVOL-FRS'     = @(4, 8, 2, 'Przy zdrowej replikacji AD')
+    'D-FSMO'           = @(2, 4, 1, '')
+    'DC-MACHINEPWD'    = @(1, 4, 1, '')
+    'DC-PORTS'         = @(1, 4, 1, '')
+    'DC-SYSVOL-SHARE'  = @(2, 6, 1, '')
+    'DC-TIME'          = @(1, 3, 1, '')
+    'D-GPO-SYNC'       = @(2, 4, 1, '')
+    'DC-DNS-SRV'       = @(1, 2, 1, '')
+    'P-DA-COUNT'       = @(2, 6, 1, 'Wymaga decyzji klienta, kto pozostaje administratorem')
+    'P-SchemaAdmins'   = @(1, 2, 1, '')
+    'P-AccountOperators' = @(1, 2, 1, '')
+    'P-ServerOperators' = @(1, 2, 1, '')
+    'P-PrintOperators' = @(1, 2, 1, '')
+    'P-BackupOperators' = @(1, 2, 1, 'Sprawdzić, czy grupy nie używa oprogramowanie do kopii')
+    'P-PNE'            = @(2, 4, 1, '')
+    'P-SPN'            = @(2, 4, 1, 'Konta usług przenieść na gMSA')
+    'P-DELEG'          = @(2, 4, 2, 'Protected Users najpierw na kontach testowych')
+    'P-STALE'          = @(1, 2, 1, '')
+    'P-ADM500'         = @(0.5, 1, 1, 'Nowe hasło do sejfu haseł')
+    'U-ADMINCOUNT'     = @(1, 3, 2, '')
+    'U-UNCONSTR'       = @(2, 8, 2, 'Analiza usług korzystających z delegacji')
+    'C-UNCONSTR'       = @(2, 8, 2, 'Analiza usług korzystających z delegacji')
+    'C-LAPS-READ-BROAD' = @(1, 3, 1, 'Po zmianie wymusić rotację haseł LAPS')
+    'C-LAPS-READABLE'  = @(1, 2, 1, '')
+    'C-LAPS-READERS'   = @(2, 4, 2, 'Przegląd z klientem')
+    'DC-CIS-RIGHTS'    = @(2, 6, 2, '')
+    'D-TRUST-SIDF'     = @(2, 4, 2, 'Uzgodnienie z administratorem domeny zaufanej')
+    'D-KRB-TRUST'      = @(1, 3, 2, 'Po obu stronach relacji')
+    'P-KRBTGT'         = @(2, 4, 1, 'Dwukrotna zmiana z odstępem; najpierw tryb symulacji')
+    'C-LAPS-NONE'      = @(8, 16, 2, 'Wdrożenie Windows LAPS przez GPO')
+    'C-LAPS-MISSING'   = @(2, 8, 2, '')
+    'C-LAPS-EXPIRED'   = @(1, 4, 1, '')
+    'C-LAPS-LEGACY'    = @(4, 12, 3, 'Migracja na Windows LAPS')
+    'U-ASREP'          = @(1, 2, 1, '')
+    'U-SPN'            = @(2, 8, 2, 'Migracja kont usług na gMSA')
+    'D-PWDLEN'         = @(2, 4, 2, 'Komunikacja do użytkowników; zmiana działa przy kolejnej zmianie hasła')
+    'D-PWDCPLX'        = @(1, 2, 2, '')
+    'D-LOCKOUT'        = @(1, 2, 1, '')
+    'DC-SPOOLER'       = @(1, 2, 1, 'Sprawdzić, czy DC nie jest serwerem wydruku')
+    'DC-LDAPSIGN'      = @(4, 12, 2, 'Najpierw zdarzenia 2889 i poprawa klientów')
+    'DC-LDAPCBT'       = @(4, 8, 2, 'Najpierw tryb "gdy obsługiwane" i zdarzenia 3039')
+    'DC-CIS-AUDIT'     = @(4, 8, 1, 'Zwiększyć dziennik Security; przekazywanie do SIEM')
+    'DC-CIS-REG'       = @(8, 24, 2, 'Etapami, po teście zgodności aplikacji')
+    'D-BACKUP'         = @(4, 8, 1, 'Z testem odtworzenia')
+    'D-RECYCLE'        = @(0.5, 1, 1, '')
+}
+$planStages = [ordered]@{
+    1 = 'Etap 1 - do 30 dni: działania szybkie i problemy krytyczne'
+    2 = 'Etap 2 - 30-90 dni: zmiany wymagające testów i uzgodnień'
+    3 = 'Etap 3 - do 12 miesięcy: projekty (migracje, modernizacja)'
+}
+function Format-Hours($H) { if ($null -eq $H) { '?' } else { ([double]$H).ToString('0.#', [System.Globalization.CultureInfo]'pl-PL') } }
 
 $ruleMeta = @{}
 foreach ($r in $ruleCatalog) { $ruleMeta[$r.Id] = $r }
@@ -2120,6 +2206,23 @@ function Get-ComplianceRows($Names, [string]$Key) {
 $nis2Rows = @(Get-ComplianceRows $nis2Names 'N')
 $isoRows  = @(Get-ComplianceRows $isoNames 'I')
 
+# Plan naprawczy: znaleziska w etapach, kolejność wg wagi
+$planRows = @(foreach ($f in $real) {
+    $pm   = $planMeta[$f.Id]
+    $etap = if ($pm) { [int]$pm[2] } else { 2 }
+    if ($f.Severity -eq 'Critical') { $etap = 1 }
+    [pscustomobject]@{
+        Etap = $etap; Id = $f.Id; Znalezisko = $f.Title; Waga = $f.Severity; Obiekty = $f.Count
+        GodzinyMin = $(if ($pm) { [double]$pm[0] } else { $null }); GodzinyMax = $(if ($pm) { [double]$pm[1] } else { $null })
+        Uwagi = $(if ($pm) { $pm[3] } else { 'Brak szacunku - do oceny' })
+    }
+} | Sort-Object Etap, { $sevOrder[$_.Waga] }, Id)
+$planSum = @{}
+foreach ($k in $planStages.Keys) {
+    $g = @($planRows | Where-Object Etap -eq $k)
+    $planSum[$k] = @([double](($g | ForEach-Object { $_.GodzinyMin } | Measure-Object -Sum).Sum), [double](($g | ForEach-Object { $_.GodzinyMax } | Measure-Object -Sum).Sum), $g.Count)
+}
+
 $diff = $null
 if ($Previous) {
     $prev    = Get-Content $Previous -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -2178,7 +2281,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
 [ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
-            Zgodnosc = [ordered]@{ NIS2 = $nis2Rows; ISO27001 = $isoRows }
+            Zgodnosc = [ordered]@{ NIS2 = $nis2Rows; ISO27001 = $isoRows }; Plan = $planRows
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
@@ -2198,6 +2301,7 @@ $objRows = foreach ($f in $sorted) {
     }
 }
 if ($objRows) { @($objRows) | Export-Csv "$base`_obiekty.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
+if ($planRows) { $planRows | Export-Csv "$base`_plan.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';' }
 
 # --- HTML ---
 function HtmlEnc([string]$s) { [System.Net.WebUtility]::HtmlEncode($s) }
@@ -2352,6 +2456,23 @@ foreach ($f in $real) {
 }
 [void]$sb.Append('</tbody></table></div></section>')
 
+[void]$sb.Append('<section><h2>Plan naprawczy</h2>')
+$totMin = ($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum
+$totMax = ($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum
+[void]$sb.Append("<p>Szacowana łączna pracochłonność: <b>$(Format-Hours $totMin)-$(Format-Hours $totMax) h</b>.</p>")
+[void]$sb.Append('<p class="note">Szacunki są orientacyjne: obejmują przygotowanie, wdrożenie i weryfikację zmian w typowej domenie, bez zakupów, licencji i migracji pojedynczych stacji. Każda zmiana wymaga zgłoszenia i akceptacji przed wykonaniem. Znaleziska krytyczne są zawsze w etapie 1.</p>')
+foreach ($k in $planStages.Keys) {
+    $g = @($planRows | Where-Object Etap -eq $k)
+    if (-not $g.Count) { continue }
+    [void]$sb.Append("<div class=`"lbl`">$(HtmlEnc $planStages[$k]) &nbsp;<span class=`"note`">($($g.Count) zadań, $(Format-Hours $planSum[$k][0])-$(Format-Hours $planSum[$k][1]) h)</span></div>")
+    [void]$sb.Append('<div class="tw"><table><thead><tr><th>Waga</th><th>Zadanie</th><th>Obiekty</th><th>Szacunek</th><th>Uwagi</th></tr></thead><tbody>')
+    foreach ($r in $g) {
+        [void]$sb.Append("<tr><td>$(Badge $r.Waga)</td><td><a href=`"#$(HtmlEnc $r.Id)`">$(HtmlEnc $r.Znalezisko)</a></td><td>$($r.Obiekty)</td><td>$(Format-Hours $r.GodzinyMin)-$(Format-Hours $r.GodzinyMax) h</td><td>$(HtmlEnc $r.Uwagi)</td></tr>")
+    }
+    [void]$sb.Append('</tbody></table></div>')
+}
+[void]$sb.Append('</section>')
+
 [void]$sb.Append('<section><h2>Szczegóły znalezisk</h2><p><button onclick="toggleAll(true)">Rozwiń wszystkie</button> <button onclick="toggleAll(false)">Zwiń wszystkie</button></p></section>')
 foreach ($f in $sorted) {
     $sev = $f.Severity.ToLower()
@@ -2410,4 +2531,5 @@ Write-Host "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100 |
 Write-Host (($areaScore.Keys | ForEach-Object { "$($_): $($areaScore[$_])" }) -join ' | ') -ForegroundColor Cyan
 $real | Format-Table Severity, Category, Title -AutoSize
 Write-Host "Raport: $base.html" -ForegroundColor Green
-Write-Host "Dane:   $base.json | $base.csv | $base`_obiekty.csv" -ForegroundColor Green
+Write-Host "Dane:   $base.json | $base.csv | $base`_obiekty.csv | $base`_plan.csv" -ForegroundColor Green
+Write-Host "Plan naprawczy: $($planRows.Count) zadań, $(Format-Hours (($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum))-$(Format-Hours (($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum)) h" -ForegroundColor Green

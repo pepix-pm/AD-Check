@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12 – 2026-11-06
+
+- Plan naprawczy: trzy etapy (do 30 dni / 30–90 dni / do 12 miesięcy), szacunek pracochłonności w godzinach, uwagi i zależności; sekcja w HTML, `Plan` w JSON, plik `_plan.csv`.
+
 ## 0.11 – 2026-11-06
 
 - Odniesienie do NIS2 art. 21 ust. 2 / UKSC i ISO/IEC 27001:2022 (załącznik A): pola NIS2 i ISO27001 w znaleziskach (HTML, JSON, CSV) i sekcja zestawienia w raporcie.
