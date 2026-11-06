@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13 – 2026-11-06
+
+- Wygląd raportu w identyfikacji PEPIX: logo z papieru firmowego (osadzone w HTML), kolory marki (#F59F00, #4299E1), spójna paleta wag i ocen, stopka, poprawiony wydruk (kolory zachowane).
+
 ## 0.12 – 2026-11-06
 
 - Plan naprawczy: trzy etapy (do 30 dni / 30–90 dni / do 12 miesięcy), szacunek pracochłonności w godzinach, uwagi i zależności; sekcja w HTML, `Plan` w JSON, plik `_plan.csv`.
