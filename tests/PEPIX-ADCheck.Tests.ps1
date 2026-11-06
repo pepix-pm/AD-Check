@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
 
@@ -74,6 +74,14 @@ Describe 'ConvertFrom-AuditText' {
         ConvertFrom-AuditText 'Success' | Should -Be 1
         ConvertFrom-AuditText 'Failure' | Should -Be 2
         ConvertFrom-AuditText 'No Auditing' | Should -Be 0
+    }
+}
+
+Describe 'Format-EncTypes' {
+    It 'opisuje bity szyfrowania' {
+        Format-EncTypes 24 | Should -Be '24 (AES128, AES256)'
+        Format-EncTypes 7 | Should -Be '7 (DES-CRC, DES-MD5, RC4)'
+        Format-EncTypes $null | Should -Match 'nieustawione'
     }
 }
 

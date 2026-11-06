@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.8)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.9)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -32,7 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.8'
+$Version = '0.9'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -90,6 +90,7 @@ $catDom  = 'Domena i las'
 $catDC   = 'Kontrolery domeny'
 $catHealth = 'Kondycja domeny i replikacja'
 $catCis    = 'Konfiguracja DC (CIS L1)'
+$catKrb    = 'Kerberos i szyfrowanie'
 
 #region ---------- funkcje pomocnicze ----------
 function Format-Date($d) { if ($d) { ([datetime]$d).ToString('yyyy-MM-dd') } else { '—' } }
@@ -458,6 +459,17 @@ function Get-TopSeverity($Rows) {
     foreach ($s in 'Critical', 'High', 'Medium', 'Low') { if (@($Rows | Where-Object Waga -eq $s).Count) { return $s } }
     'Low'
 }
+# Bity msDS-SupportedEncryptionTypes -> tekst (0x1 DES-CBC-CRC, 0x2 DES-CBC-MD5, 0x4 RC4, 0x8 AES128, 0x10 AES256)
+function Format-EncTypes($Value) {
+    if ($null -eq $Value -or "$Value" -eq '0') { return 'nieustawione (domyślne KDC, zwykle z RC4)' }
+    $n = [int64]$Value; $t = @()
+    if ($n -band 1)    { $t += 'DES-CRC' }
+    if ($n -band 2)    { $t += 'DES-MD5' }
+    if ($n -band 4)    { $t += 'RC4' }
+    if ($n -band 8)    { $t += 'AES128' }
+    if ($n -band 0x10) { $t += 'AES256' }
+    "$n ($($t -join ', '))"
+}
 #endregion
 
 #region ---------- dane bazowe i inwentaryzacja ----------
@@ -468,7 +480,7 @@ try { $trusts = @(Get-ADTrust -Filter * -Server $Server) } catch { }
 
 $userProps = 'PasswordNeverExpires','PasswordLastSet','LastLogonDate','AccountNotDelegated',
              'ServicePrincipalName','Enabled','MemberOf','adminCount','DoesNotRequirePreAuth',
-             'SIDHistory','whenCreated','userAccountControl','TrustedForDelegation'
+             'SIDHistory','whenCreated','userAccountControl','TrustedForDelegation','msDS-SupportedEncryptionTypes'
 
 # Grupy uprzywilejowane po SID (nazwy bywają spolszczone)
 $isRoot = $domain.DNSRoot -eq $forest.RootDomain
@@ -563,7 +575,8 @@ Invoke-Check 'PRIV' {
         Id = 'P-SPN'; Category = $catPriv; Severity = 'High'
         Title = 'Konta uprzywilejowane z SPN (Kerberoasting)'
         Objects = ($en | Where-Object ServicePrincipalName | ForEach-Object {
-                    ConvertTo-UserRow $_ | Add-Member -NotePropertyName SPN -NotePropertyValue ($_.ServicePrincipalName -join ', ') -PassThru })
+                    ConvertTo-UserRow $_ | Add-Member -NotePropertyName SPN -NotePropertyValue ($_.ServicePrincipalName -join ', ') -PassThru |
+                    Add-Member -NotePropertyName Szyfrowanie -NotePropertyValue (Format-EncTypes $_.'msDS-SupportedEncryptionTypes') -PassThru })
         Description = 'Każdy użytkownik domeny może pobrać bilet TGS dla konta z SPN i łamać jego hasło offline. Dla konta uprzywilejowanego oznacza to bezpośrednią ścieżkę do przejęcia domeny.'
         Recommendation = 'Usunąć SPN z kont administracyjnych. Konta usług przenieść na gMSA i wyjąć z grup uprzywilejowanych.'
         Fix = (Fx 'Set-ADUser -Identity <konto> -ServicePrincipalNames @{Remove=''<SPN>''}')
@@ -635,8 +648,9 @@ Invoke-Check 'USERS' {
         Id = 'U-SPN'; Category = $catUser; Severity = 'Medium'
         Title = 'Konta użytkowników z SPN (Kerberoasting)'
         Objects = ($users | Where-Object ServicePrincipalName | ForEach-Object {
-                    ConvertTo-UserRow $_ | Add-Member -NotePropertyName SPN -NotePropertyValue ($_.ServicePrincipalName -join ', ') -PassThru })
-        Description = 'Każdy użytkownik domeny może pobrać bilet TGS dla tych kont i łamać ich hasła offline. Konta usług mają często słabe, niezmieniane hasła.'
+                    ConvertTo-UserRow $_ | Add-Member -NotePropertyName SPN -NotePropertyValue ($_.ServicePrincipalName -join ', ') -PassThru |
+                    Add-Member -NotePropertyName Szyfrowanie -NotePropertyValue (Format-EncTypes $_.'msDS-SupportedEncryptionTypes') -PassThru })
+        Description = 'Każdy użytkownik domeny może pobrać bilet TGS dla tych kont i łamać ich hasła offline. Konta usług mają często słabe, niezmieniane hasła. Kolumna Szyfrowanie: przy RC4 lub wartości nieustawionej bilet jest szyfrowany RC4, które łamie się wielokrotnie szybciej niż AES.'
         Recommendation = 'Zastąpić gMSA. Jeśli to niemożliwe: hasło ≥ 25 znaków, tylko AES, regularna zmiana.'
         Fix = (Fx 'Set-ADUser -Identity <konto> -KerberosEncryptionType AES128,AES256', '# docelowo: New-ADServiceAccount -Name <gmsa> -DNSHostName <gmsa>.{DOMENA} -PrincipalsAllowedToRetrieveManagedPassword <serwer>$')
         Mitre = 'T1558.003'
@@ -955,6 +969,131 @@ Invoke-Check 'LAPS-ACL' {
             Fix = (Fx 'Find-LapsADExtendedRights -Identity ''<DN OU>''')
             Mitre = 'T1555'
         }
+    }
+}
+#endregion
+
+#region ---------- Kerberos: słabe szyfrowanie (DES, RC4) ----------
+# Konfiguracja: atrybut msDS-SupportedEncryptionTypes kont, komputerów, gMSA i zaufań (zwykłe konto).
+# Użycie: zdarzenia 4768/4769 z typem szyfrowania biletu DES/RC4 w dzienniku Security DC (tylko -UseWinRM, wymaga audytu Kerberos).
+$krbEventDays = 7
+Invoke-Check 'KRB-ENC' {
+    $kdcRows = [System.Collections.Generic.List[object]]::new()
+    $usage   = [System.Collections.Generic.List[object]]::new()
+    $krbUnk  = [System.Collections.Generic.List[object]]::new()
+    $encName = @{ '0x1' = 'DES-CBC-CRC'; '0x3' = 'DES-CBC-MD5'; '0x17' = 'RC4-HMAC'; '0x18' = 'RC4-HMAC-EXP' }
+
+    if ($UseWinRM -and -not $SkipDCChecks) {
+        foreach ($dc in $dcs) {
+            try {
+                $r = Invoke-Command -ComputerName $dc.HostName -ErrorAction Stop -ArgumentList $krbEventDays -ScriptBlock {
+                    param([int]$Days)
+                    $ms = [int64]$Days * 86400000
+                    $xp = "*[System[(EventID=4768 or EventID=4769) and TimeCreated[timediff(@SystemTime) <= $ms]]] and " +
+                          "*[EventData[Data[@Name='TicketEncryptionType']='0x1' or Data[@Name='TicketEncryptionType']='0x3' or " +
+                          "Data[@Name='TicketEncryptionType']='0x17' or Data[@Name='TicketEncryptionType']='0x18']]"
+                    $kdc = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\KDC' -ErrorAction SilentlyContinue).DefaultDomainSupportedEncTypes
+                    $ev  = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents 5000 -ErrorAction SilentlyContinue)
+                    $grp = @($ev | ForEach-Object {
+                        $d = @{}; foreach ($n in ([xml]$_.ToXml()).Event.EventData.Data) { $d[$n.Name] = $n.'#text' }
+                        [pscustomobject]@{ Typ = $d['TicketEncryptionType']; Konto = $d['TargetUserName']; Usluga = $d['ServiceName']; Adres = $d['IpAddress'] }
+                    } | Group-Object Typ, Konto, Usluga, Adres | ForEach-Object {
+                        $f = $_.Group[0]
+                        [pscustomobject]@{ Typ = $f.Typ; Konto = $f.Konto; Usluga = $f.Usluga; Adres = $f.Adres; Liczba = $_.Count }
+                    })
+                    [pscustomobject]@{ Kdc = $kdc; Grupy = $grp; Razem = $ev.Count }
+                }
+                if ($null -ne $r.Kdc -and ([int64]$r.Kdc -band 3)) {
+                    $kdcRows.Add([pscustomobject]@{ Obiekt = $dc.HostName; Typ = 'KDC: DefaultDomainSupportedEncTypes (rejestr DC)'; Szyfrowanie = (Format-EncTypes $r.Kdc); Kontener = '' })
+                }
+                foreach ($g in @($r.Grupy)) {
+                    $row = [pscustomobject]@{
+                        DC = $dc.HostName; Szyfrowanie = $(if ($encName.ContainsKey("$($g.Typ)")) { $encName["$($g.Typ)"] } else { "$($g.Typ)" })
+                        Konto = $g.Konto; Usluga = $g.Usluga; AdresKlienta = $g.Adres; Bilety = $g.Liczba; Kod = "$($g.Typ)"
+                    }
+                    $usage.Add($row)
+                }
+            } catch {   # brak WinRM / dostępu do dziennika - pozostałe testy działają dalej
+                $krbUnk.Add([pscustomobject]@{ DC = $dc.HostName; Blad = $_.Exception.Message })
+            }
+        }
+    }
+
+    # DES dopuszczony w konfiguracji: bity 0x1/0x2 w msDS-SupportedEncryptionTypes albo komputer z USE_DES_KEY_ONLY (użytkownicy: U-DES)
+    $desObj = @(Get-ADObject -Server $Server -Properties 'msDS-SupportedEncryptionTypes', userAccountControl, sAMAccountName -LDAPFilter (
+                '(|(msDS-SupportedEncryptionTypes:1.2.840.113556.1.4.804:=3)' +
+                '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=2097152)))') |
+                Where-Object { -not ($_.userAccountControl -band 2) })
+    $desRows = @($desObj | ForEach-Object {
+        $enc = Format-EncTypes $_.'msDS-SupportedEncryptionTypes'
+        if ($_.userAccountControl -band 0x200000) { $enc = "$enc + USE_DES_KEY_ONLY" }
+        [pscustomobject]@{ Obiekt = $(if ($_.sAMAccountName) { $_.sAMAccountName } else { $_.Name }); Typ = $_.ObjectClass; Szyfrowanie = $enc; Kontener = (Get-ParentOU $_.DistinguishedName) }
+    }) + @($kdcRows)
+
+    Add-IfAny @{
+        Id = 'D-KRB-DES'; Category = $catKrb; Severity = 'High'
+        Title = 'Konfiguracja dopuszczająca szyfrowanie DES w Kerberos'
+        Objects = $desRows
+        Description = 'DES jest złamany - bilety Kerberos zaszyfrowane DES można odszyfrować w krótkim czasie i podszyć się pod konto lub usługę. Windows Server 2025 i Windows 11 24H2 nie obsługują już DES, więc takie ustawienia to także pozostałość po starych systemach/aplikacjach.'
+        Recommendation = 'Usunąć DES z obsługiwanych typów szyfrowania (zostawić AES128/AES256), wyłączyć flagę "Use only Kerberos DES encryption types". Zmienić hasło konta, aby wygenerować klucze AES.'
+        Fix = (Fx 'Set-ADUser -Identity <konto> -KerberosEncryptionType AES128,AES256', 'Set-ADComputer -Identity <komputer> -KerberosEncryptionType AES128,AES256', 'Set-ADAccountControl -Identity ''<komputer>$'' -UseDESKeyOnly $false')
+        Mitre = 'T1558'
+    }
+
+    # Konta bez kluczy AES: hasło ustawione przed pierwszym DC 2008+ (data utworzenia grupy Read-only Domain Controllers, RID 521)
+    $aesSince = (Get-ADGroup -Identity "$dSid-521" -Properties whenCreated -Server $Server).whenCreated
+    $ft = $aesSince.ToFileTime()
+    $noAes = @(Get-ADUser -Server $Server -Properties PasswordLastSet, LastLogonDate, whenCreated -LDAPFilter (
+               "(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(pwdLastSet>=1)(pwdLastSet<=$ft))"))
+    $krbtgt = Get-ADUser -Identity krbtgt -Properties PasswordLastSet, LastLogonDate, whenCreated -Server $Server
+    if ($krbtgt.PasswordLastSet -and $krbtgt.PasswordLastSet -lt $aesSince) { $noAes += $krbtgt }
+    Add-IfAny @{
+        Id = 'D-KRB-NOAES'; Category = $catKrb
+        Severity = $(if (@($noAes | Where-Object { $privSids[$_.SID.Value] -or $_.SamAccountName -eq 'krbtgt' }).Count) { 'High' } else { 'Medium' })
+        Title = 'Konta bez kluczy AES (hasło sprzed wprowadzenia AES w domenie)'
+        Objects = ($noAes | ForEach-Object {
+            ConvertTo-UserRow $_ | Add-Member -NotePropertyName Uprzywilejowane -NotePropertyValue $(if ($privSids[$_.SID.Value] -or $_.SamAccountName -eq 'krbtgt') { 'Tak' } else { '' }) -PassThru })
+        Description = "Klucze AES powstają dopiero przy zmianie hasła na DC Windows Server 2008 lub nowszym (pierwszy taki DC w domenie: $(Format-Date $aesSince)). Te konta mają tylko klucze RC4/DES - Kerberos używa dla nich słabego szyfrowania, a po wyłączeniu RC4 przestaną działać."
+        Recommendation = 'Zmienić hasła tych kont (konta usług - w uzgodnieniu z właścicielem aplikacji). Hasło krbtgt zmieniać dwukrotnie zgodnie z procedurą (patrz P-KRBTGT).'
+        Fix = (Fx 'Set-ADAccountPassword -Identity <konto> -Reset', 'Set-ADUser -Identity <konto> -ChangePasswordAtLogon $true')
+        Mitre = 'T1558'
+    }
+
+    # Zaufania bez jawnie włączonego AES
+    $trustObjs = @(Get-ADObject -SearchBase "CN=System,$($domain.DistinguishedName)" -LDAPFilter '(objectClass=trustedDomain)' -Properties 'msDS-SupportedEncryptionTypes', trustPartner -Server $Server)
+    Add-IfAny @{
+        Id = 'D-KRB-TRUST'; Category = $catKrb; Severity = 'Medium'
+        Title = 'Relacje zaufania bez włączonego szyfrowania AES'
+        Objects = ($trustObjs | Where-Object { -not ([int64]$_.'msDS-SupportedEncryptionTypes' -band 0x18) } |
+                   ForEach-Object { [pscustomobject]@{ Zaufanie = $_.trustPartner; Szyfrowanie = (Format-EncTypes $_.'msDS-SupportedEncryptionTypes') } })
+        Description = 'Bilety między domenami w tych relacjach mogą być szyfrowane RC4, które jest znacznie słabsze od AES i jest wycofywane przez Microsoft.'
+        Recommendation = 'Włączyć AES na relacji zaufania po obu stronach (w konsoli Active Directory Domains and Trusts: "The other domain supports Kerberos AES Encryption").'
+        Fix = (Fx 'ksetup /setenctypeattr <domena_zaufana> AES128-CTS-HMAC-SHA1-96 AES256-CTS-HMAC-SHA1-96   # na DC, po obu stronach')
+        Mitre = 'T1558'
+    }
+
+    $show = { $_ | Select-Object -Property * -ExcludeProperty Kod }
+    Add-IfAny @{
+        Id = 'DC-KRB-DES-USED'; Category = $catKrb; Severity = 'High'
+        Title = "Bilety Kerberos szyfrowane DES wydane w ostatnich $krbEventDays dniach"
+        Objects = ($usage | Where-Object { $_.Kod -in '0x1', '0x3' } | ForEach-Object $show)
+        Description = 'Kontrolery domeny faktycznie wydają bilety szyfrowane DES (zdarzenia 4768/4769). Wskazane konta/usługi i adresy klientów pokazują, który system lub aplikacja wymaga DES.'
+        Recommendation = 'Zidentyfikować systemy z kolumny AdresKlienta i usługi z kolumny Usluga, zaktualizować je lub skonfigurować AES, następnie usunąć DES z konfiguracji kont (D-KRB-DES).'
+        Fix = (Fx '# na DC: Get-WinEvent -LogName Security -FilterXPath "*[EventData[Data[@Name=''TicketEncryptionType'']=''0x3'']]" -MaxEvents 50')
+        Mitre = 'T1558'
+    }
+    Add-IfAny @{
+        Id = 'DC-KRB-RC4-USED'; Category = $catKrb; Severity = 'Medium'
+        Title = "Bilety Kerberos szyfrowane RC4 wydane w ostatnich $krbEventDays dniach"
+        Objects = ($usage | Where-Object { $_.Kod -in '0x17', '0x18' } | Sort-Object Bilety -Descending | ForEach-Object $show)
+        Description = 'Bilety RC4 dla kont usług (4769) można łamać offline wielokrotnie szybciej niż AES (Kerberoasting). Microsoft wycofuje RC4 w Kerberos; lista pokazuje, co trzeba przygotować przed wyłączeniem RC4.'
+        Recommendation = 'Dla kont usług ustawić AES (msDS-SupportedEncryptionTypes = AES128+AES256) i zmienić hasło; sprawdzić stare systemy i urządzenia z kolumny AdresKlienta. Docelowo wyłączyć RC4 na DC (GPO: Network security: Configure encryption types allowed for Kerberos).'
+        Fix = (Fx 'Set-ADUser -Identity <konto_uslugi> -KerberosEncryptionType AES128,AES256', 'Set-ADAccountPassword -Identity <konto_uslugi> -Reset   # klucze AES powstają przy zmianie hasła')
+        Mitre = 'T1558.003'
+    }
+    Add-IfAny @{
+        Id = 'DC-KRB-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'; Title = 'Nie odczytano użycia szyfrowania Kerberos z DC'; Objects = $krbUnk
+        Description = 'Odczyt dziennika Security lub rejestru KDC przez WinRM nie powiódł się (brak WinRM lub uprawnień).'
     }
 }
 #endregion

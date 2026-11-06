@@ -116,6 +116,11 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | U-PWDNOTREQ | High | Flaga PASSWD_NOTREQD | T1078.002 |
 | U-REVERSIBLE | High | Hasło przechowywane odwracalnie | T1003.003 |
 | U-DES | High | Wymuszony DES | T1558 |
+| D-KRB-DES | High | DES dopuszczony w konfiguracji kont, komputerów, gMSA, zaufań lub KDC (`msDS-SupportedEncryptionTypes`, USE_DES_KEY_ONLY; KDC tylko z `-UseWinRM`) | T1558 |
+| D-KRB-NOAES | High / Medium | Konta bez kluczy AES – hasło sprzed pierwszego DC 2008+ (High, gdy konto uprzywilejowane lub krbtgt) | T1558 |
+| D-KRB-TRUST | Medium | Relacje zaufania bez włączonego AES | T1558 |
+| DC-KRB-DES-USED | High | Faktycznie wydane bilety DES w ostatnich 7 dniach (zdarzenia 4768/4769, tylko `-UseWinRM`) | T1558 |
+| DC-KRB-RC4-USED | Medium | Faktycznie wydane bilety RC4 w ostatnich 7 dniach (tylko `-UseWinRM`) | T1558.003 |
 | U-GUEST | High | Włączone konto Gość | T1078.001 |
 | U-SPN | Medium | Konta użytkowników z SPN | T1558.003 |
 | U-SIDHIST | Medium | Konta z SIDHistory | T1134.005 |

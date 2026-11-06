@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9 – 2026-11-06
+
+- Kerberos i szyfrowanie: DES w konfiguracji kont/komputerów/zaufań/KDC (D-KRB-DES), konta bez kluczy AES (D-KRB-NOAES), zaufania bez AES (D-KRB-TRUST); z `-UseWinRM` faktyczne bilety DES/RC4 z dziennika Security DC (DC-KRB-DES-USED, DC-KRB-RC4-USED).
+- P-SPN i U-SPN: kolumna Szyfrowanie (RC4 / AES).
+
 ## 0.8 – 2026-11-06
 
 - Aktualizacje DC: poziom poprawek (UBR) przez zdalny rejestr na zwykłym koncie, porównanie z ostatnim Patch Tuesday (DC-PATCH-OLD) i między DC (DC-PATCH-DIFF); z `-UseWinRM` ostatnia poprawka, restart, oczekujący restart, WSUS (DC-REBOOT). Tabela w załączniku A.
