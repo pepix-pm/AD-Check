@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16 – 2026-11-06
+
+- Klasyfikacja systemów serwerowych także po numerze build, gdy nazwa nie zawiera roku: „Windows Server® 2008”, „Hyper-V Server” (2016/2019), Small Business Server 2011. Wcześniej takie systemy z buildem < 20348 trafiały błędnie do „SAC”; jako SAC oznaczane są teraz tylko buildy 16299–19042.
+- Hyper-V Server rozpoznawany jako serwer (wcześniej pomijany, bo nazwa nie zawiera „Windows”).
+- Windows 11 z buildem nowszym niż tabela (np. 26300, Insider) opisany jako „nowsza niż tabela / Insider” – bez oceny.
+- C-LAPS-MISSING ocenia tylko komputery z Windows; konta bez systemu Windows (Linux, NAS, klastry, brak `operatingSystem`) są pomijane i liczone w opisie.
+- Testy Pester dla `Get-OsLifecycle`; poprawka nazwy bloku `Describe` dla Pester 6.
+
 ## 0.15 – 2026-11-06
 
 - **Bez RSAT:** odczyt AD przez LDAP (`System.DirectoryServices`) zamiast modułu ActiveDirectory. Skrypt działa na każdym Windows bez instalacji i bez uprawnień administratora na stacji. Replikacja i kopia AD z atrybutów konstruowanych `msDS-NCReplInboundNeighbors` / `msDS-ReplAttributeMetaData`; członkostwo rekursywne przez LDAP_MATCHING_RULE_IN_CHAIN.

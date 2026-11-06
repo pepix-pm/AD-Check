@@ -4,9 +4,14 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
+    # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
+    $vars = 'win11Builds', 'win10Ltsc', 'serverEol', 'serverBuilds', 'sacBuilds', 'legacyClient'
+    $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                   $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $false) |
+        Where-Object { $_.Left.VariablePath.UserPath -in $vars } | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
 
     $ldapMulti = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl', 'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl')
 
@@ -79,7 +84,7 @@ Describe 'ConvertFrom-AuditText' {
     }
 }
 
-Describe 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime' {
+Describe 'Format-EncTypes, ConvertFrom-Ldap*, ConvertFrom-DnToDns' {
     It 'opisuje bity szyfrowania' {
         Format-EncTypes 24 | Should -Be '24 (AES128, AES256)'
         Format-EncTypes 7 | Should -Be '7 (DES-CRC, DES-MD5, RC4)'
@@ -136,5 +141,35 @@ Describe 'Funkcje pomocnicze' {
     }
     It 'Get-TopSeverity wybiera najwyższą wagę' {
         Get-TopSeverity @([pscustomobject]@{ Waga = 'Low' }, [pscustomobject]@{ Waga = 'High' }) | Should -Be 'High'
+    }
+}
+
+Describe 'Get-OsLifecycle' {
+    It '<Os> <Ver> -> <Typ> <Wersja>' -ForEach @(
+        @{ Os = 'Windows Server® 2008 Standard';    Ver = '6.0 (6003)';   Typ = 'Serwer'; Wersja = '2008' }
+        @{ Os = 'Windows Server 2008 R2 Enterprise'; Ver = '6.1 (7601)';  Typ = 'Serwer'; Wersja = '2008 R2' }
+        @{ Os = 'Windows Server 2016 Standard';     Ver = '10.0 (14393)'; Typ = 'Serwer'; Wersja = '2016' }
+        @{ Os = 'Hyper-V Server';                   Ver = '10.0 (17763)'; Typ = 'Serwer'; Wersja = 'Hyper-V 2019' }
+        @{ Os = 'Hyper-V Server 2012 R2';           Ver = '6.3 (9600)';   Typ = 'Serwer'; Wersja = 'Hyper-V 2012 R2' }
+        @{ Os = 'Windows Small Business Server 2011 Standard'; Ver = '6.1 (7601)'; Typ = 'Serwer'; Wersja = '2008 R2' }
+        @{ Os = 'Windows Server Datacenter';        Ver = '10.0 (19042)'; Typ = 'Serwer'; Wersja = 'SAC (build 19042)' }
+        @{ Os = 'Windows Server Datacenter';        Ver = '10.0 (20348)'; Typ = 'Serwer'; Wersja = '2022' }
+        @{ Os = 'Windows 2000 Server';              Ver = '5.0 (2195)';   Typ = 'Legacy'; Wersja = 'Windows 2000' }
+        @{ Os = 'Windows XP Professional x64 Edition'; Ver = '5.2 (3790)'; Typ = 'Legacy'; Wersja = 'Windows XP' }
+        @{ Os = 'Windows 10 IoT Enterprise LTSC';   Ver = '10.0 (19044)'; Typ = 'LTSC';   Wersja = 'LTSC 2021' }
+        @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (26200)'; Typ = 'W11';    Wersja = '25H2' }
+        @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (26300)'; Typ = 'W11';    Wersja = 'build 26300 (nowsza niż tabela / Insider)' }
+        @{ Os = '';                                 Ver = '';             Typ = 'Inne';   Wersja = '' }
+        @{ Os = 'Linux';                            Ver = '';             Typ = 'Inne';   Wersja = '' }
+    ) {
+        $r = Get-OsLifecycle $Os $Ver
+        $r.Typ | Should -Be $Typ
+        $r.Wersja | Should -Be $Wersja
+    }
+    It 'Server 2008 bez roku w nazwie nie jest klasyfikowany jako SAC' {
+        (Get-OsLifecycle 'Windows Server® 2008 Standard' '6.0 (6002)').Koniec | Should -Be ([datetime]'2020-01-14')
+    }
+    It 'Hyper-V Server 2016 ma datę końca wsparcia Server 2016' {
+        (Get-OsLifecycle 'Hyper-V Server' '10.0 (14393)').Koniec | Should -Be ([datetime]'2027-01-12')
     }
 }

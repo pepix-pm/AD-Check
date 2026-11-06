@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.15'
+$Version = '0.16'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -355,6 +355,10 @@ $win10Ltsc = @{
 }
 $serverEol = [ordered]@{ '2025' = '2034-11-14'; '2022' = '2031-10-14'; '2019' = '2029-01-09'; '2016' = '2027-01-12'
                          '2012' = '2023-10-10'; '2008' = '2020-01-14'; '2003' = '2015-07-14' }
+# Build -> wersja serwera, gdy w nazwie nie ma roku lub rok jest nietypowy ("Windows Server® 2008", "Hyper-V Server", SBS 2011)
+$serverBuilds = @{ 3790 = '2003'; 6001 = '2008'; 6002 = '2008'; 6003 = '2008'; 7600 = '2008 R2'; 7601 = '2008 R2'
+                   9200 = '2012'; 9600 = '2012 R2'; 14393 = '2016'; 17763 = '2019'; 20348 = '2022'; 26100 = '2025' }
+$sacBuilds    = @(16299, 17134, 18362, 18363, 19041, 19042)   # Windows Server SAC 1709-20H2, wszystkie bez wsparcia od 2022-08-09
 $legacyClient = [ordered]@{ 'Windows 8.1' = '2023-01-10'; 'Windows 8' = '2016-01-12'; 'Windows 7' = '2020-01-14'
                             'Vista' = '2017-04-11'; 'Windows XP' = '2014-04-08'; 'Windows 2000' = '2010-07-13'; 'Windows NT' = '2004-12-31' }
 
@@ -364,18 +368,26 @@ function Get-OsLifecycle([string]$Os, [string]$Ver) {
     $build = 0
     if ($Ver -match '\((\d+)\)') { $build = [int]$Matches[1] }
     $r = [pscustomobject]@{ Typ = 'Inne'; Wersja = ''; Koniec = $null }
-    if ($Os -notmatch 'Windows') { return $r }
+    if ($Os -notmatch 'Windows|Hyper-V Server') { return $r }
 
     foreach ($k in $legacyClient.Keys) {
         if ($Os -match [regex]::Escape($k)) { $r.Typ = 'Legacy'; $r.Wersja = $k; $r.Koniec = [datetime]$legacyClient[$k]; return $r }
     }
-    if ($Os -match 'Windows Server') {
+    # Windows Server, Hyper-V Server, Storage/Web/Small Business Server; nazwa bywa z ® ("Windows Server® 2008 Standard")
+    if ($Os -match 'Server') {
         $r.Typ = 'Serwer'
-        foreach ($y in $serverEol.Keys) {
-            if ($Os -match "Server $y") { $r.Wersja = $(if ($Os -match "$y R2") { "$y R2" } else { $y }); $r.Koniec = [datetime]$serverEol[$y]; return $r }
+        $wer = $null
+        if ($Os -match '(?<!\d)(20\d\d)(?!\d)' -and $serverEol.Contains($Matches[1])) {
+            $y = $Matches[1]; $wer = $(if ($Os -match "$y\s*R2") { "$y R2" } else { $y })
+        } elseif ($serverBuilds.ContainsKey($build)) {
+            $wer = $serverBuilds[$build]
         }
-        # Bez roku w nazwie i build < 20348 = kanał półroczny (SAC 1709-20H2), wszystkie bez wsparcia
-        if ($build -gt 0 -and $build -lt 20348) { $r.Wersja = "SAC (build $build)"; $r.Koniec = [datetime]'2022-08-09' }
+        if ($wer) {
+            $prefix = $(if ($Os -match 'Hyper-V Server') { 'Hyper-V ' } else { '' })
+            $r.Wersja = "$prefix$wer"; $r.Koniec = [datetime]$serverEol[$wer.Substring(0, 4)]
+        } elseif ($sacBuilds -contains $build) {
+            $r.Wersja = "SAC (build $build)"; $r.Koniec = [datetime]'2022-08-09'
+        } elseif ($build -gt 0) { $r.Wersja = "build $build" }   # nieznany build - bez oceny
         return $r
     }
     if ($Os -match 'Windows 10') {
@@ -399,7 +411,8 @@ function Get-OsLifecycle([string]$Os, [string]$Ver) {
             $ent = $Os -match 'Enterprise|Education' -and $Os -notmatch 'Pro Education'
             $r.Wersja = $b.Nazwa
             $r.Koniec = [datetime]$(if ($ent) { $b.Ent } else { $b.Pro })
-        } else { $r.Wersja = "build $build" }   # nowsza wersja, której nie ma jeszcze w tabeli - bez oceny
+        } elseif ($build -gt 26200) { $r.Wersja = "build $build (nowsza niż tabela / Insider)" }   # bez oceny
+        else { $r.Wersja = "build $build" }
         return $r
     }
     $r
@@ -1299,7 +1312,9 @@ Invoke-Check 'COMPUTERS' {
         }
     } else {
         # Stan LAPS komputera: typ (Windows LAPS ma pierwszeństwo) i data wygaśnięcia hasła (FILETIME)
-        $lapsRows = @(foreach ($c in $nonDc) {
+        # Tylko Windows: Linux/NAS/klastry (CNO/VCO) i obiekty bez operatingSystem nie mają klienta LAPS
+        $lapsSkip = @($nonDc | Where-Object { $_.OperatingSystem -notmatch 'Windows|Hyper-V' }).Count
+        $lapsRows = @(foreach ($c in ($nonDc | Where-Object { $_.OperatingSystem -match 'Windows|Hyper-V' })) {
             $win = $c.'msLAPS-PasswordExpirationTime'; $leg = $c.'ms-Mcs-AdmPwdExpirationTime'
             $exp = $null
             try { if ($win) { $exp = [datetime]::FromFileTime([int64]$win) } elseif ($leg) { $exp = [datetime]::FromFileTime([int64]$leg) } } catch { $exp = $null }
@@ -1313,7 +1328,7 @@ Invoke-Check 'COMPUTERS' {
             Id = 'C-LAPS-MISSING'; Category = $catComp; Severity = 'Medium'
             Title = 'Komputery bez hasła zarządzanego przez LAPS'
             Objects = ($lapsRows | Where-Object { -not $_.Typ } | ForEach-Object { ConvertTo-ComputerRow $_.C })
-            Description = "Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS (LAPS ma $covered z $($lapsRows.Count) aktywnych kont komputerów poza DC). Ich lokalne hasło administratora jest prawdopodobnie wspólne z innymi komputerami."
+            Description = "Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS (LAPS ma $covered z $($lapsRows.Count) aktywnych kont komputerów Windows poza DC; pominięto $lapsSkip kont bez systemu Windows w atrybucie operatingSystem). Ich lokalne hasło administratora jest prawdopodobnie wspólne z innymi komputerami."
             Recommendation = 'Sprawdzić, czy OU są objęte GPO LAPS i czy komputery mają uprawnienie do zapisu hasła. Urządzenia spoza Windows (np. Linux, NAS) wyłączyć z oceny lub zarządzać ich hasłami inaczej.'
             Fix = (Fx 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', 'gpresult /r   # na komputerze: czy GPO LAPS jest zastosowane', 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze')
             Mitre = 'T1550.002'
