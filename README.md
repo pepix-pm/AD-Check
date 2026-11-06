@@ -31,6 +31,31 @@ clear
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
 
+## Stacja robocza Windows 10/11
+
+Docelowo skrypt uruchamiany jest ze stacji roboczej. Jednorazowo, w PowerShellu **jako administrator**:
+
+```powershell
+Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
+```
+
+Moduł pobiera się z Windows Update. Jeśli stacja korzysta z WSUS, instalacja kończy się błędem `0x800f0954` – wtedy włącz w GPO/lokalnych zasadach *Computer Configuration > Administrative Templates > System > Specify settings for optional component installation and component repair* z opcją pobierania bezpośrednio z Windows Update.
+
+Samo uruchomienie skryptu nie wymaga uprawnień administratora stacji.
+
+**Stacja w domenie klienta** – zaloguj się kontem domenowym i uruchom bez `-Server`.
+
+**Stacja spoza domeny klienta** (np. laptop PEPIX w sieci klienta lub przez VPN):
+
+1. DNS stacji musi rozwiązywać domenę klienta (serwery DNS = DC klienta), bo przez nazwę domeny odczytywany jest m.in. SYSVOL.
+2. Uruchom PowerShell z poświadczeniami domeny klienta – bez dołączania stacji do domeny:
+   ```powershell
+   runas /netonly /user:FIRMA\uzytkownik powershell.exe
+   ```
+3. W nowym oknie podaj domenę jawnie: `& $adcheck -Klient KLIENT -Server firma.local`.
+
+W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie konto domenowe użyte do odczytu.
+
 ## Uruchomienie z GitHuba (bez kopiowania pliku)
 
 Repozytorium jest prywatne, więc pobranie wymaga tokenu. Użyj **fine-grained PAT** tylko do odczytu:
