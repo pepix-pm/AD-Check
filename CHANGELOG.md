@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17 – 2026-11-06
+
+Nowe testy (LDAP, zwykłe konto):
+- **DC-REGISTRATION** – konto wyglądające na DC bez obiektu serwera lub NTDS Settings w CN=Sites, z niespójną grupą podstawową i flagą DC albo zwykły komputer w OU Domain Controllers.
+- **DC-SUBNET** – adres DC poza podsieciami AD lub w podsieci innej lokacji.
+- **D-FFL** – poziom funkcjonalny lasu < 2016.
+- **P-ADMLOGIN** – wbudowany Administrator używany w ostatnich 35 dniach.
+- **P-PROTECTED** – konta uprzywilejowane spoza Protected Users (bez kont z SPN i RID 500); brak grupy Protected Users.
+- **C-OWNER** – komputery, których właścicielem obiektu jest konto spoza administratorów (ryzyko RBCD, odczytu LAPS).
+- **D-PREWIN2000** – Everyone / Anonymous Logon / Authenticated Users w Pre-Windows 2000 Compatible Access.
+- Funkcja `Test-IpInSubnet` z testami Pester.
+
 ## 0.16 – 2026-11-06
 
 - Klasyfikacja systemów serwerowych także po numerze build, gdy nazwa nie zawiera roku: „Windows Server® 2008”, „Hyper-V Server” (2016/2019), Small Business Server 2011. Wcześniej takie systemy z buildem < 20348 trafiały błędnie do „SAC”; jako SAC oznaczane są teraz tylko buildy 16299–19042.

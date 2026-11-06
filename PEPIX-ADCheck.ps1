@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.16'
+$Version = '0.17'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -508,6 +508,13 @@ $ruleCatalog = @(
     @{ Id = 'DC-CIS-REG';        O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia zabezpieczeń DC (CIS L1)' }
     @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
     @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
+    @{ Id = 'D-FFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny lasu < 2016' }
+    @{ Id = 'DC-REGISTRATION';   O = 'S'; M = 'Replikacja i kondycja';        C = 'DC-REG';       T = 'Konto DC bez kompletnej rejestracji w lesie' }
+    @{ Id = 'DC-SUBNET';         O = 'S'; M = 'Replikacja i kondycja';        C = 'SITES';        T = 'Adres DC poza podsieciami AD' }
+    @{ Id = 'P-ADMLOGIN';        O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Wbudowany Administrator używany' }
+    @{ Id = 'P-PROTECTED';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane spoza Protected Users' }
+    @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
+    @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
 )
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
@@ -564,7 +571,8 @@ $complianceMap = @{
     'Audyt'                        = @{ N = 'b, f'; I = '8.15, 8.16' }
     'Utwardzenie DC'               = @{ N = 'e, g'; I = '8.9' }
     'Kopia i odtwarzanie'          = @{ N = 'c';    I = '8.13' }
-    'Inne'                         = @{ N = 'a';    I = '' }
+    'Uprawnienia domyślne'         = @{ N = 'i';    I = '5.15, 8.9' }
+    'Inne'                       = @{ N = 'a';    I = '' }
 }
 
 # ---------- plan naprawczy: pracochłonność i etap ----------
@@ -645,6 +653,13 @@ $planMeta = @{
     'DC-CIS-REG'       = @(8, 24, 2, 'Etapami, po teście zgodności aplikacji')
     'D-BACKUP'         = @(4, 8, 1, 'Z testem odtworzenia')
     'D-RECYCLE'        = @(0.5, 1, 1, '')
+    'D-FFL'            = @(1, 2, 3, 'Po wycofaniu starszych DC we wszystkich domenach lasu')
+    'DC-REGISTRATION'  = @(2, 4, 1, 'Najpierw potwierdzić z klientem, że serwer nie istnieje')
+    'DC-SUBNET'        = @(1, 3, 1, 'Lista segmentów sieci od klienta')
+    'P-ADMLOGIN'       = @(1, 4, 2, 'Ustalić, kto i skąd używa konta; usługi przenieść na gMSA')
+    'P-PROTECTED'      = @(2, 6, 2, 'Etapami, najpierw konto testowe')
+    'C-OWNER'          = @(1, 4, 2, 'Zmiana właściciela skryptem; razem z C-MAQ')
+    'D-PREWIN2000'     = @(1, 3, 2, 'Test zgodności starszych systemów i urządzeń')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
 $planStages = @{
@@ -701,6 +716,18 @@ function Invoke-Check([string]$Name, [scriptblock]$Block) {
         Add-Finding @{ Id = "ERR-$Name"; Category = 'Błędy testów'; Severity = 'Info'
                        Title = "Test $($Name) nie wykonany: $($_.Exception.Message)" }
     }
+}
+
+# Czy adres IPv4 należy do podsieci w zapisie CIDR ("10.0.0.0/24"); IPv6 i błędny zapis = $false
+function Test-IpInSubnet([string]$Ip, [string]$Cidr) {
+    if ($Cidr -notmatch '^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$') { return $false }
+    $len = [int]$Matches[2]; $netTxt = $Matches[1]
+    $a = $null; $n = $null
+    if ($len -gt 32 -or -not [System.Net.IPAddress]::TryParse($Ip, [ref]$a) -or -not [System.Net.IPAddress]::TryParse($netTxt, [ref]$n)) { return $false }
+    if ($a.AddressFamily -ne 'InterNetwork') { return $false }
+    $toNum = { param($x) $b = $x.GetAddressBytes(); ([uint64]$b[0] * 16777216) + ([uint64]$b[1] * 65536) + ([uint64]$b[2] * 256) + [uint64]$b[3] }
+    $mask = [uint64]4294967296 - [uint64][math]::Pow(2, 32 - $len)
+    ((& $toNum $a) -band $mask) -eq ((& $toNum $n) -band $mask)
 }
 
 function Get-InnerException($e) { while ($e.InnerException) { $e = $e.InnerException }; $e }
@@ -1081,6 +1108,43 @@ Invoke-Check 'PRIV' {
             Mitre = 'T1078.002'
         }
     }
+    # lastLogonTimestamp replikuje się z opóźnieniem do ok. 14 dni - próg 35 dni jak w typowych narzędziach audytowych
+    if ($adm.Enabled -and $adm.LastLogonDate -and $adm.LastLogonDate -gt $now.AddDays(-35)) {
+        Add-Finding @{
+            Id = 'P-ADMLOGIN'; Category = $catPriv; Severity = 'Medium'
+            Title = "Wbudowane konto Administrator używane w ostatnich 35 dniach (ostatnio: $(Format-Date $adm.LastLogonDate))"
+            Objects = (ConvertTo-UserRow $adm)
+            Description = 'Konto Administrator (RID 500) jest wspólne - z logów nie wynika, kto go użył - i nie podlega blokadzie po błędnych hasłach, więc jest pierwszym celem zgadywania haseł. Regularne użycie oznacza zwykle, że administratorzy nie mają kont imiennych, hasło zna wiele osób albo na tym koncie działają usługi lub zadania zaplanowane. Data pochodzi z lastLogonTimestamp (dokładność do ok. 14 dni).'
+            Recommendation = 'Administrować z imiennych kont. Konto Administrator zostawić jako awaryjne z hasłem w sejfie haseł. Ustalić w dzienniku Security DC (zdarzenia 4624/4768), skąd następują logowania, i przenieść usługi oraz zadania na gMSA.'
+            Fix = (Fx 'Get-WinEvent -ComputerName <DC> -LogName Security -FilterXPath "*[System[EventID=4768] and EventData[Data[@Name=''TargetSid'']=''{SID}-500'']]" -MaxEvents 50 | Format-List TimeCreated, Message')
+            Mitre = 'T1078.002'
+        }
+    }
+
+    # Protected Users (RID 525) rekursywnie; grupa istnieje, gdy w domenie był PDC z Windows Server 2012 R2+
+    if ($protectedUsersDn) {
+        $puSids = @{}
+        foreach ($u in @(Get-LdapGroupUsers -GroupSid "$dSid-525")) { $puSids[$u.SID.Value] = $true }
+        Add-IfAny @{
+            Id = 'P-PROTECTED'; Category = $catPriv; Severity = 'Low'
+            Title = 'Konta uprzywilejowane spoza grupy Protected Users'
+            Objects = ($en | Where-Object { -not $puSids.ContainsKey($_.SID.Value) -and -not $_.ServicePrincipalName -and $_.SID.Value -ne "$dSid-500" } |
+                       ForEach-Object { ConvertTo-UserRow $_ })
+            Description = "Członkowie Protected Users nie mogą używać NTLM, DES ani RC4, ich poświadczenia nie są buforowane (m.in. w LSASS w postaci umożliwiającej pass-the-hash) ani delegowane, a bilet TGT jest ważny 4 h. Ochrona po stronie DC wymaga poziomu funkcjonalnego domeny 2012 R2 (obecnie: $($domain.DomainMode)). Pominięto konta z SPN (usługi) i wbudowanego Administratora (konto awaryjne)."
+            Recommendation = 'Dodawać imienne konta administratorów stopniowo, najpierw konto testowe (logowanie RDP, narzędzia używające NTLM, uwierzytelnianie po adresie IP). Nie dodawać kont usług ani komputerów; zostawić co najmniej jedno konto awaryjne poza grupą.'
+            Fix = (Fx 'Add-ADGroupMember -Identity ''{SID}-525'' -Members <konto>   # Protected Users')
+            Mitre = 'T1550.002'
+        }
+    } else {
+        Add-Finding @{
+            Id = 'P-PROTECTED'; Category = $catPriv; Severity = 'Low'
+            Title = 'Brak grupy Protected Users w domenie'
+            Description = 'Grupa powstaje, gdy rolę PDC przejmie DC z Windows Server 2012 R2 lub nowszym. Bez niej nie można objąć kont administratorów dodatkową ochroną przed kradzieżą poświadczeń.'
+            Recommendation = 'Przenieść rolę PDC na DC z aktualnym systemem (patrz DC-OS-EOL).'
+            Fix = (Fx 'Move-ADDirectoryServerOperationMasterRole -Identity <DC_2016+> -OperationMasterRole PDCEmulator')
+            Mitre = 'T1550.002'
+        }
+    }
 
     $krb = Get-LdapObject -Identity krbtgt
     $krbAge = [int]($now - $krb.PasswordLastSet).TotalDays
@@ -1367,6 +1431,47 @@ Invoke-Check 'COMPUTERS' {
 }
 #endregion
 
+#region ---------- komputery: właściciel obiektu ----------
+# Komputer dołączony przez zwykłe konto (MachineAccountQuota lub delegacja) ma je jako właściciela obiektu.
+# Właściciel może zmienić ACL, a więc ustawić RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) i przejąć komputer
+# albo nadać sobie odczyt hasła LAPS. Odczyt właściciela (SecurityMasks Owner) działa na zwykłym koncie.
+Invoke-Check 'COMP-OWNER' {
+    $okOwners = @("$dSid-512", "$dSid-519", "$dSid-516", 'S-1-5-32-544', 'S-1-5-32-548', 'S-1-5-18')
+    $sidName  = @{}
+    $resolve  = {
+        param([string]$Sid)
+        if (-not $sidName.ContainsKey($Sid)) {
+            $o = $null
+            try { $o = Get-LdapObject -Identity $Sid } catch { $o = $null }
+            $sidName[$Sid] = $(if ($o.sAMAccountName) { $o.sAMAccountName } else { $Sid })
+        }
+        $sidName[$Sid]
+    }
+    $rows = foreach ($c in @(Find-Ldap -SecurityDescriptor -Properties nTSecurityDescriptor, operatingSystem, primaryGroupID, 'mS-DS-CreatorSID' -Filter (
+                '(&(objectCategory=computer)(mS-DS-CreatorSID=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))'))) {
+        if ([int]$c.primarygroupid -in 516, 521 -or $c.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+        $owner = "$($c.ntsecuritydescriptor.GetOwner([System.Security.Principal.SecurityIdentifier]))"
+        if ($owner -in $okOwners) { continue }
+        $creator = ''
+        try { $creator = "$([System.Security.Principal.SecurityIdentifier]::new([byte[]]$c.'ms-ds-creatorsid', 0))" } catch { $creator = '' }
+        ConvertTo-ComputerRow $c |
+            Add-Member -NotePropertyName Wlasciciel -NotePropertyValue (& $resolve $owner) -PassThru |
+            Add-Member -NotePropertyName Utworzyl -NotePropertyValue $(if ($creator) { & $resolve $creator } else { '' }) -PassThru
+    }
+    Add-IfAny @{
+        Id = 'C-OWNER'; Category = $catComp; Severity = 'Medium'
+        Title = 'Komputery, których właścicielem jest konto spoza administratorów'
+        Objects = $rows
+        Description = 'Te komputery dołączyło do domeny zwykłe konto (przez MachineAccountQuota lub delegację na OU) i nadal jest właścicielem ich obiektu w AD. Właściciel może zmienić uprawnienia obiektu, a przez to ustawić delegację RBCD i uzyskać uprawnienia administratora na komputerze albo nadać sobie odczyt hasła LAPS. Przejęcie takiego konta (np. konta technika używanego do dołączania stacji) daje dostęp do wszystkich dołączonych przez nie komputerów.'
+        Recommendation = 'Zmienić właściciela obiektów na Domain Admins. Dołączanie komputerów robić kontem z delegacją na wybrane OU (nie przez MachineAccountQuota - patrz C-MAQ) i po dołączeniu przywracać właściciela. Sprawdzić, czy na tych komputerach nie ustawiono msDS-AllowedToActOnBehalfOfOtherIdentity.'
+        Fix = (Fx '$c = Get-ADComputer <komputer>; $acl = Get-Acl "AD:$($c.DistinguishedName)"',
+                  '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$($c.DistinguishedName)" -AclObject $acl',
+                  'Get-ADComputer -Filter * -Properties msDS-AllowedToActOnBehalfOfOtherIdentity | Where-Object msDS-AllowedToActOnBehalfOfOtherIdentity')
+        Mitre = 'T1134'
+    }
+}
+#endregion
+
 #region ---------- LAPS: dostęp do haseł ----------
 # Kto może odczytać hasła LAPS: ACL kontenerów z komputerami (odczyt DACL wystarcza zwykłemu kontu).
 # Hasło czyta ten, kto ma na komputerach prawo rozszerzone (CONTROL_ACCESS) do atrybutu hasła, wszystkie prawa rozszerzone albo pełną kontrolę.
@@ -1576,6 +1681,34 @@ Invoke-Check 'DOMAIN' {
             Description = 'Niższy poziom funkcjonalny blokuje część mechanizmów ochrony (m.in. pełne działanie Protected Users, nowsze opcje Kerberos).'
             Recommendation = 'Po wycofaniu starszych DC podnieść poziom funkcjonalny domeny i lasu do Windows2016.'
             Fix = (Fx 'Set-ADDomainMode -Identity {DOMENA} -DomainMode Windows2016Domain', 'Set-ADForestMode -Identity {LAS} -ForestMode Windows2016Forest')
+        }
+    }
+    if ("$($forest.ForestMode)" -notmatch '2016|2025') {
+        Add-Finding @{
+            Id = 'D-FFL'; Category = $catDom; Severity = 'Low'
+            Title = "Poziom funkcjonalny lasu: $($forest.ForestMode)"
+            Description = 'Poziom funkcjonalny lasu wyznacza najstarszą dopuszczalną wersję DC we wszystkich domenach lasu i blokuje funkcje całego lasu: Kosz AD wymaga co najmniej 2008 R2, uprzywilejowany dostęp czasowy (PAM) - 2016. Niski poziom oznacza zwykle, że w lesie są lub były stare DC.'
+            Recommendation = 'Po wycofaniu starszych DC we wszystkich domenach lasu podnieść poziom funkcjonalny domen, a następnie lasu do Windows2016. Operacja jest praktycznie nieodwracalna - wcześniej potwierdzić, że nie ma DC ze starszym systemem.'
+            Fix = (Fx 'Get-ADForest | Select-Object ForestMode, Domains', 'Get-ADDomainController -Filter * | Select-Object HostName, OperatingSystem', 'Set-ADForestMode -Identity {LAS} -ForestMode Windows2016Forest')
+        }
+    }
+
+    # Pre-Windows 2000 Compatible Access (S-1-5-32-554): szerokie podmioty jako członkowie (FSP: CN=S-1-5-11,CN=ForeignSecurityPrincipals,...)
+    $wide = @{ 'S-1-1-0' = 'Everyone (Wszyscy)'; 'S-1-5-7' = 'Anonymous Logon'; 'S-1-5-11' = 'Authenticated Users' }
+    $pw   = Get-LdapObject -Identity 'S-1-5-32-554' -Properties member
+    $pwHits = @(@($pw.member) | ForEach-Object { if ("$_" -match '^CN=(S-1-[\d-]+),') { $Matches[1] } } | Where-Object { $wide.ContainsKey($_) })
+    if ($pwHits.Count) {
+        $anon = @($pwHits | Where-Object { $_ -ne 'S-1-5-11' }).Count -gt 0
+        Add-Finding @{
+            Id = 'D-PREWIN2000'; Category = $catDom; Severity = $(if ($anon) { 'High' } else { 'Low' })
+            Title = "Pre-Windows 2000 Compatible Access zawiera: $(($pwHits | ForEach-Object { $wide[$_] }) -join ', ')"
+            Objects = ($pwHits | ForEach-Object { [pscustomobject]@{ Czlonek = $wide[$_]; SID = $_ } })
+            Description = 'Grupa Pre-Windows 2000 Compatible Access ma prawo odczytu atrybutów i członkostwa większości użytkowników i grup. Everyone lub Anonymous Logon w grupie pozwala wyliczyć konta i grupy domeny bez logowania (anonimowe zapytania SAMR/LDAP), co ułatwia zgadywanie haseł. Authenticated Users to ustawienie domyślne domen zakładanych w trybie zgodności; daje każdemu kontu, także komputera, szerszy odczyt niż potrzebny.'
+            Recommendation = 'Usunąć Everyone i Anonymous Logon. Authenticated Users usunąć po teście zgodności (systemy NT4/Samba, starsze urządzenia i aplikacje wyliczające użytkowników). Zmiana działa po wygaśnięciu tokenów (wylogowanie, restart usług).'
+            Fix = (Fx '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-7>'')   # Anonymous Logon',
+                      '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-1-0>'')   # Everyone',
+                      '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-11>'')  # Authenticated Users - po teście')
+            Mitre = 'T1087.002'
         }
     }
     $rb = Get-LdapObject -Identity "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties 'msDS-EnabledFeatureBL'
@@ -2224,6 +2357,76 @@ Invoke-Check 'FSMO' {
         Description = 'Rola jest przypisana do usuniętego lub nieistniejącego DC. Zależnie od roli: brak puli RID (nie da się tworzyć kont), problemy z czasem i zmianą haseł (PDC), brak zmian schematu lub domen.'
         Recommendation = 'Przejąć rolę (seize) na działającym DC - tylko jeśli poprzedni właściciel na pewno nie wróci do sieci.'
         Fix = (Fx 'netdom query fsmo', 'Move-ADDirectoryServerOperationMasterRole -Identity <DC> -OperationMasterRole <rola> -Force   # seize')
+    }
+}
+
+# Spójność rejestracji DC: konto komputera (primaryGroupID 516/521, flaga SERVER_TRUST_ACCOUNT / PARTIAL_SECRETS_ACCOUNT,
+# OU Domain Controllers) a obiekt serwera i NTDS Settings w CN=Sites. Pozostałość po DC usuniętym bez degradacji.
+Invoke-Check 'DC-REG' {
+    $p = 'primaryGroupID', 'serverReferenceBL', 'dNSHostName', 'operatingSystem'
+    $all = @{}
+    foreach ($c in @(Find-Ldap -Properties $p -Filter ('(&(objectCategory=computer)(|(primaryGroupID=516)(primaryGroupID=521)' +
+                     '(userAccountControl:1.2.840.113556.1.4.803:=8192)(userAccountControl:1.2.840.113556.1.4.803:=67108864)))')) +
+                   @(Find-Ldap -SearchBase $domain.DomainControllersContainer -Properties $p -Filter '(objectCategory=computer)')) {
+        $all[$c.distinguishedname] = $c
+    }
+    $rows = foreach ($c in $all.Values) {
+        $pg  = [int]$c.primarygroupid; $uac = [int]$c.useraccountcontrol
+        $problems = [System.Collections.Generic.List[string]]::new()
+        $flag  = [bool]($uac -band 0x2000) -or [bool]($uac -band 0x4000000)
+        $group = $pg -in 516, 521
+        if (-not $flag -and -not $group) {
+            $problems.Add('zwykły komputer w OU Domain Controllers (obejmują go zasady GPO dla DC)')
+        } else {
+            if ($flag -ne $group) { $problems.Add("niespójne konto: primaryGroupID $pg, flaga DC $(if ($flag) { 'tak' } else { 'nie' })") }
+            $srvDn = @($c.serverreferencebl | Where-Object { $_ -like "*,CN=Sites,$configDn" })[0]
+            if (-not $srvDn) {
+                $problems.Add('brak obiektu serwera w lokacjach (CN=Sites)')
+            } else {
+                $ntds = $null
+                try { $ntds = Get-LdapObject -Identity "CN=NTDS Settings,$srvDn" } catch { $ntds = $null }
+                if (-not $ntds) { $problems.Add('brak NTDS Settings - DC zdegradowany lub usunięty niepoprawnie') }
+            }
+            if (-not $c.Enabled) { $problems.Add('konto wyłączone') }
+        }
+        if ($problems.Count) {
+            ConvertTo-ComputerRow $c | Add-Member -NotePropertyName Problem -NotePropertyValue ($problems -join '; ') -PassThru
+        }
+    }
+    Add-IfAny @{
+        Id = 'DC-REGISTRATION'; Category = $catHealth; Severity = 'Medium'
+        Title = 'Konta kontrolerów domeny bez kompletnej rejestracji w lesie'
+        Objects = $rows
+        Description = 'Konto komputera wygląda na kontroler domeny (grupa podstawowa, flaga konta lub OU Domain Controllers), ale jego rejestracja w konfiguracji lasu jest niepełna albo niespójna. Zwykle to pozostałość po DC wyłączonym bez degradacji lub zdegradowanym z błędem. Konto z flagą DC ma uprawnienia kontrolera domeny (m.in. replikację haseł - DCSync), więc jest zbędnym celem ataku; klienci i aplikacje mogą też próbować łączyć się z nieistniejącym DC.'
+        Recommendation = 'Ustalić, czy serwer istnieje. Jeśli nie - usunąć jego metadane (Usługi i lokacje AD albo ntdsutil "metadata cleanup"), konto komputera i rekordy DNS (_msdcs, _ldap, _kerberos). Zwykłe serwery przenieść z OU Domain Controllers.'
+        Fix = (Fx 'Get-ADComputer <DC> -Properties PrimaryGroupID, UserAccountControl, ServerReferenceBL',
+                  'ntdsutil "metadata cleanup" "remove selected server <DN serwera>" quit quit   # tylko gdy serwer na pewno nie istnieje',
+                  'Remove-ADComputer -Identity <DC>')
+        Mitre = 'T1003.006'
+    }
+}
+
+# Adresy DC a podsieci AD (CN=Subnets,CN=Sites): brak podsieci lub podsieć innej lokacji
+Invoke-Check 'SITES' {
+    $subnets = @(Find-Ldap -SearchBase "CN=Subnets,CN=Sites,$configDn" -Filter '(objectClass=subnet)' -Properties siteObject)
+    $siteOf  = { param($Dn) if ($Dn) { (("$Dn" -split '(?<!\\),')[0]) -replace '^CN=', '' } else { '' } }
+    $rows = foreach ($dc in $dcs) {
+        if (-not $dc.IPv4Address) { continue }   # nierozwiązywalny DC - patrz DC-PORTS
+        $best = @($subnets | Where-Object { Test-IpInSubnet $dc.IPv4Address $_.name } |
+                  Sort-Object { [int](($_.name -split '/')[1]) } -Descending)[0]
+        $problem = if (-not $best) { 'adres poza wszystkimi podsieciami AD' }
+                   elseif (-not $best.siteobject) { "podsieć $($best.name) bez przypisanej lokacji" }
+                   elseif ($dc.Site -and (& $siteOf $best.siteobject) -ne $dc.Site) { "podsieć $($best.name) należy do lokacji $(& $siteOf $best.siteobject)" }
+        if ($problem) { [pscustomobject]@{ DC = $dc.HostName; Adres = $dc.IPv4Address; LokacjaDC = $dc.Site; Problem = $problem } }
+    }
+    Add-IfAny @{
+        Id = 'DC-SUBNET'; Category = $catHealth; Severity = 'Low'
+        Title = 'Kontrolery domeny poza podsieciami AD swojej lokacji'
+        Objects = $rows
+        Description = "Lokacje i podsieci AD decydują, z którym DC łączą się komputery i jak przebiega replikacja. Gdy adresu DC nie ma w żadnej podsieci albo podsieć wskazuje inną lokację, klienci mogą uwierzytelniać się do odległego DC przez łącza WAN, a DC rejestrują zdarzenia NETLOGON 5807. Zwykle brakuje wtedy podsieci także dla innych segmentów sieci (zmiana adresacji, nowe VLAN-y). Zdefiniowanych podsieci: $($subnets.Count). Adres DC ustalony przez DNS ze stacji uruchamiającej przegląd."
+        Recommendation = 'Dodać podsieci wszystkich segmentów sieci (także serwerowych i VPN) i przypisać je do właściwych lokacji. Adresy klientów spoza podsieci są w pliku %SystemRoot%\debug\netlogon.log na DC (NO_CLIENT_SITE).'
+        Fix = (Fx 'New-ADReplicationSubnet -Name ''<adres/maska>'' -Site ''<lokacja>''',
+                  'Select-String -Path \\<DC>\admin$\debug\netlogon.log -Pattern NO_CLIENT_SITE | Select-Object -Last 20')
     }
 }
 

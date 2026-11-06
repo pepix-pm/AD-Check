@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -171,5 +171,22 @@ Describe 'Get-OsLifecycle' {
     }
     It 'Hyper-V Server 2016 ma datę końca wsparcia Server 2016' {
         (Get-OsLifecycle 'Hyper-V Server' '10.0 (14393)').Koniec | Should -Be ([datetime]'2027-01-12')
+    }
+}
+
+Describe 'Test-IpInSubnet' {
+    It '<Ip> w <Cidr> = <Wynik>' -ForEach @(
+        @{ Ip = '10.1.2.3';     Cidr = '10.1.2.0/24';    Wynik = $true }
+        @{ Ip = '10.1.3.3';     Cidr = '10.1.2.0/24';    Wynik = $false }
+        @{ Ip = '192.168.5.10'; Cidr = '192.168.0.0/16'; Wynik = $true }
+        @{ Ip = '172.16.0.1';   Cidr = '172.16.0.1/32';  Wynik = $true }
+        @{ Ip = '8.8.8.8';      Cidr = '0.0.0.0/0';      Wynik = $true }
+        @{ Ip = '10.0.0.129';   Cidr = '10.0.0.128/25';  Wynik = $true }
+        @{ Ip = '10.0.0.127';   Cidr = '10.0.0.128/25';  Wynik = $false }
+        @{ Ip = '10.0.0.1';     Cidr = '10.0.0.0';       Wynik = $false }
+        @{ Ip = 'fe80::1';      Cidr = '10.0.0.0/8';     Wynik = $false }
+        @{ Ip = '10.0.0.1';     Cidr = 'fe80::/64';      Wynik = $false }
+    ) {
+        Test-IpInSubnet $Ip $Cidr | Should -Be $Wynik
     }
 }

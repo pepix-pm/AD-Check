@@ -120,6 +120,8 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-DELEG | Medium | Konta uprzywilejowane bez ochrony przed delegacją | T1558 |
 | P-STALE | Medium | Nieużywane aktywne konta uprzywilejowane | T1078.002 |
 | P-ADM500 | Medium | Wiek hasła wbudowanego Administratora | T1078.002 |
+| P-ADMLOGIN | Medium | Wbudowane konto Administrator używane w ostatnich 35 dniach | T1078.002 |
+| P-PROTECTED | Low | Konta uprzywilejowane spoza Protected Users (bez kont z SPN i RID 500) | T1550.002 |
 | U-UNCONSTR | Critical | Użytkownicy z delegacją nieograniczoną | T1558 |
 | U-ASREP | High | Brak preautentykacji Kerberos | T1558.004 |
 | U-PWDNOTREQ | High | Flaga PASSWD_NOTREQD | T1078.002 |
@@ -148,6 +150,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | C-LAPS-EXPIRED | Medium | Hasło LAPS przestało się zmieniać (wygasło, a komputer był w sieci) | T1550.002 |
 | C-LAPS-LEGACY | Low | Komputery na wycofanym Microsoft LAPS (legacy) | T1550.002 |
 | C-LAPS-READERS | Low | Kto spoza DA/EA może czytać hasła LAPS (ACL na OU) – do weryfikacji | T1555 |
+| C-OWNER | Medium | Komputery, których właścicielem jest zwykłe konto (ryzyko RBCD / odczytu LAPS) | T1134 |
 | C-MAQ | Medium | MachineAccountQuota > 0 | T1136.002 |
 | C-STALE | Low | Nieużywane konta komputerów | T1078.002 |
 | D-RECYCLE | Medium | Kosz AD wyłączony | – |
@@ -156,6 +159,8 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-LOCKOUT | Medium | Brak blokady konta | T1110.003 |
 | D-TRUST-SIDF | Medium | Zaufania zewnętrzne bez filtrowania SID | T1134.005 |
 | D-DFL | Low | Poziom funkcjonalny domeny < 2016 | – |
+| D-FFL | Low | Poziom funkcjonalny lasu < 2016 | – |
+| D-PREWIN2000 | High / Low | Everyone, Anonymous Logon (High) lub Authenticated Users (Low) w Pre-Windows 2000 Compatible Access | T1087.002 |
 | DC-OS-EOL | High | DC z systemem bez wsparcia | T1210 |
 | DC-SPOOLER | High | Print Spooler na DC | T1187 |
 | DC-SMB1 | High | SMBv1 na DC | T1210 |
@@ -182,6 +187,8 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
 | D-GPO-SYNC | Medium | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC | – |
 | DC-DNS-SRV | Medium | DC bez rekordu SRV `_ldap._tcp.dc._msdcs` | – |
+| DC-REGISTRATION | Medium | Konto DC bez obiektu serwera / NTDS Settings w lesie, niespójne flagi lub zwykły komputer w OU Domain Controllers | T1003.006 |
+| DC-SUBNET | Low | Adres DC poza podsieciami AD lub w podsieci innej lokacji | – |
 
 ## Aktualizacje kontrolerów domeny
 
