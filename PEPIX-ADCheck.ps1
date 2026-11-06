@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.5)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.6)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -32,7 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.5'
+$Version = '0.6'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -88,6 +88,7 @@ $catUser = 'Konta użytkowników'
 $catComp = 'Komputery'
 $catDom  = 'Domena i las'
 $catDC   = 'Kontrolery domeny'
+$catHealth = 'Kondycja domeny i replikacja'
 
 #region ---------- funkcje pomocnicze ----------
 function Format-Date($d) { if ($d) { ([datetime]$d).ToString('yyyy-MM-dd') } else { '—' } }
@@ -233,6 +234,28 @@ function Invoke-Check([string]$Name, [scriptblock]$Block) {
 }
 
 function Get-InnerException($e) { while ($e.InnerException) { $e = $e.InnerException }; $e }
+
+# Czy port TCP odpowiada (bez uprawnień)
+function Test-TcpPort([string]$Computer, [int]$Port, [int]$TimeoutMs = 2000) {
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    try {
+        $ar = $tcp.BeginConnect($Computer, $Port, $null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+        $tcp.EndConnect($ar); $true
+    } catch { $false }
+    finally { $tcp.Close() }
+}
+
+# Skrócona nazwa partycji (kontekstu nazewniczego) do tabel replikacji
+function Get-NcName([string]$Nc) {
+    switch -Regex ($Nc) {
+        '^CN=Schema,'         { 'Schemat'; break }
+        '^CN=Configuration,'  { 'Konfiguracja'; break }
+        '^DC=DomainDnsZones,' { 'DomainDnsZones'; break }
+        '^DC=ForestDnsZones,' { 'ForestDnsZones'; break }
+        default               { "Domena ($Nc)" }
+    }
+}
 
 # Czy na zdalnym hoście istnieje potok nazwany (zwykłe konto domenowe wystarcza)
 function Test-RemotePipe([string]$Computer, [string]$Pipe, [int]$TimeoutMs = 3000) {
@@ -578,11 +601,16 @@ Invoke-Check 'USERS' {
 #endregion
 
 #region ---------- komputery i LAPS ----------
-$invOs = [System.Collections.Generic.List[object]]::new()   # wypełniana w teście COMPUTERS
+$invOs      = [System.Collections.Generic.List[object]]::new()   # wypełniana w teście COMPUTERS
+$lapsSchema = @{}                                                # lDAPDisplayName -> schemaIDGUID, wypełniana w teście COMPUTERS
+$lapsOUs    = [System.Collections.Generic.List[string]]::new()   # kontenery z komputerami (nie-DC) - do analizy ACL LAPS
 Invoke-Check 'COMPUTERS' {
-    $lapsAttrs = @((Get-ADObject -SearchBase $rootDse.schemaNamingContext -Server $Server `
-        -LDAPFilter '(|(lDAPDisplayName=ms-Mcs-AdmPwdExpirationTime)(lDAPDisplayName=msLAPS-PasswordExpirationTime))' `
-        -Properties lDAPDisplayName).lDAPDisplayName)
+    # Atrybuty LAPS obecne w schemacie (legacy: ms-Mcs-*, Windows LAPS: msLAPS-*), z GUID-ami do analizy ACL
+    Get-ADObject -SearchBase $rootDse.schemaNamingContext -Server $Server -Properties lDAPDisplayName, schemaIDGUID -LDAPFilter (
+        '(|(lDAPDisplayName=ms-Mcs-AdmPwd)(lDAPDisplayName=ms-Mcs-AdmPwdExpirationTime)(lDAPDisplayName=msLAPS-Password)' +
+        '(lDAPDisplayName=msLAPS-EncryptedPassword)(lDAPDisplayName=msLAPS-PasswordExpirationTime))') |
+        ForEach-Object { $lapsSchema[$_.lDAPDisplayName] = [guid]::new([byte[]]$_.schemaIDGUID) }
+    $lapsAttrs = @('ms-Mcs-AdmPwdExpirationTime', 'msLAPS-PasswordExpirationTime' | Where-Object { $lapsSchema.ContainsKey($_) })
 
     $props = @('OperatingSystem','OperatingSystemVersion','LastLogonDate','TrustedForDelegation','primaryGroupID','whenCreated') + $lapsAttrs
     $comps = @(Get-ADComputer -Filter 'Enabled -eq $true' -Properties $props -Server $Server)
@@ -660,6 +688,8 @@ Invoke-Check 'COMPUTERS' {
         Mitre = 'T1078.002'
     }
 
+    foreach ($ou in @($nonDc | ForEach-Object { Get-ParentOU $_.DistinguishedName } | Sort-Object -Unique)) { $lapsOUs.Add($ou) }
+
     if ($lapsAttrs.Count -eq 0) {
         Add-Finding @{
             Id = 'C-LAPS-NONE'; Category = $catComp; Severity = 'High'
@@ -670,13 +700,42 @@ Invoke-Check 'COMPUTERS' {
             Mitre = 'T1550.002'
         }
     } else {
+        # Stan LAPS komputera: typ (Windows LAPS ma pierwszeństwo) i data wygaśnięcia hasła (FILETIME)
+        $lapsRows = @(foreach ($c in $nonDc) {
+            $win = $c.'msLAPS-PasswordExpirationTime'; $leg = $c.'ms-Mcs-AdmPwdExpirationTime'
+            $exp = $null
+            try { if ($win) { $exp = [datetime]::FromFileTime([int64]$win) } elseif ($leg) { $exp = [datetime]::FromFileTime([int64]$leg) } } catch { $exp = $null }
+            [pscustomobject]@{ C = $c; Typ = $(if ($win) { 'Windows LAPS' } elseif ($leg) { 'LAPS (legacy)' } else { '' }); Wygasa = $exp }
+        })
+        $lapsRow = { ConvertTo-ComputerRow $_.C | Add-Member -NotePropertyName LAPS -NotePropertyValue $_.Typ -PassThru |
+                     Add-Member -NotePropertyName HasloWygasa -NotePropertyValue (Format-Date $_.Wygasa) -PassThru }
+        $covered = @($lapsRows | Where-Object Typ).Count
+
         Add-IfAny @{
             Id = 'C-LAPS-MISSING'; Category = $catComp; Severity = 'Medium'
             Title = 'Komputery bez hasła zarządzanego przez LAPS'
-            Objects = ($nonDc | Where-Object { $c = $_; -not ($lapsAttrs | Where-Object { $c.$_ }) } | ForEach-Object { ConvertTo-ComputerRow $_ })
-            Description = 'Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS.'
-            Recommendation = 'Sprawdzić, czy OU są objęte GPO LAPS i czy komputery mają uprawnienie do zapisu hasła.'
-            Fix = (Fx 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', 'gpresult /r   # na komputerze: czy GPO LAPS jest zastosowane')
+            Objects = ($lapsRows | Where-Object { -not $_.Typ } | ForEach-Object { ConvertTo-ComputerRow $_.C })
+            Description = "Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS (LAPS ma $covered z $($lapsRows.Count) aktywnych kont komputerów poza DC). Ich lokalne hasło administratora jest prawdopodobnie wspólne z innymi komputerami."
+            Recommendation = 'Sprawdzić, czy OU są objęte GPO LAPS i czy komputery mają uprawnienie do zapisu hasła. Urządzenia spoza Windows (np. Linux, NAS) wyłączyć z oceny lub zarządzać ich hasłami inaczej.'
+            Fix = (Fx 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', 'gpresult /r   # na komputerze: czy GPO LAPS jest zastosowane', 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze')
+            Mitre = 'T1550.002'
+        }
+        Add-IfAny @{
+            Id = 'C-LAPS-EXPIRED'; Category = $catComp; Severity = 'Medium'
+            Title = 'Komputery z hasłem LAPS, które przestało się zmieniać'
+            Objects = ($lapsRows | Where-Object { $_.Wygasa -and $_.C.LastLogonDate -and $_.C.LastLogonDate -gt $_.Wygasa.AddDays(2) } | ForEach-Object $lapsRow)
+            Description = 'Hasło LAPS wygasło, a komputer od tego czasu był w sieci (logował się do domeny) i go nie zmienił. Zwykle oznacza to usunięte GPO LAPS, brak uprawnień komputera do zapisu hasła albo odinstalowanego klienta LAPS - lokalne hasło przestaje być rotowane.'
+            Recommendation = 'Sprawdzić na komputerze dziennik LAPS i zastosowanie GPO; po naprawie wymusić rotację.'
+            Fix = (Fx 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze', 'Invoke-LapsPolicyProcessing   # na komputerze, Windows LAPS', 'Reset-LapsPassword   # na komputerze, Windows LAPS')
+            Mitre = 'T1550.002'
+        }
+        Add-IfAny @{
+            Id = 'C-LAPS-LEGACY'; Category = $catComp; Severity = 'Low'
+            Title = 'Komputery zarządzane przestarzałym Microsoft LAPS (legacy)'
+            Objects = ($lapsRows | Where-Object { $_.Typ -eq 'LAPS (legacy)' } | ForEach-Object $lapsRow)
+            Description = 'Microsoft LAPS (legacy, ms-Mcs-AdmPwd) jest wycofany i nie działa na Windows 11 23H2+ ani Windows Server 2025. Przechowuje hasło w AD bez szyfrowania, bez historii haseł i bez ochrony hasła DSRM kontrolerów domeny.'
+            Recommendation = 'Migracja na Windows LAPS: rozszerzenie schematu, GPO Windows LAPS z szyfrowaniem hasła (dostęp tylko dla wskazanej grupy), po przejściu odinstalowanie klienta legacy.'
+            Fix = (Fx 'Update-LapsADSchema', 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', '# GPO: Administrative Templates > System > LAPS > Configure password backup directory = Active Directory; Enable password encryption = Enabled')
             Mitre = 'T1550.002'
         }
     }
@@ -690,6 +749,80 @@ Invoke-Check 'COMPUTERS' {
             Recommendation = 'Ustawić ms-DS-MachineAccountQuota = 0; dołączanie do domeny przez delegację uprawnień na wybranej OU.'
             Fix = (Fx 'Set-ADDomain -Identity {DOMENA} -Replace @{''ms-DS-MachineAccountQuota''=0}')
             Mitre = 'T1136.002'
+        }
+    }
+}
+#endregion
+
+#region ---------- LAPS: dostęp do haseł ----------
+# Kto może odczytać hasła LAPS: ACL kontenerów z komputerami (odczyt DACL wystarcza zwykłemu kontu).
+# Hasło czyta ten, kto ma na komputerach prawo rozszerzone (CONTROL_ACCESS) do atrybutu hasła, wszystkie prawa rozszerzone albo pełną kontrolę.
+Invoke-Check 'LAPS-ACL' {
+    $secret = @('ms-Mcs-AdmPwd', 'msLAPS-Password', 'msLAPS-EncryptedPassword' | Where-Object { $lapsSchema.ContainsKey($_) })
+    if ($secret.Count -eq 0) { return }
+    $guidName = @{}; foreach ($a in $secret) { $guidName[$lapsSchema[$a]] = $a }
+    $computerClass = [guid]'bf967a86-0de6-11d0-a285-00aa003049e2'
+    $okSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-10', 'S-1-5-9', 'S-1-3-0', "$dSid-512", "$dSid-519")   # SYSTEM, Administrators, SELF, DC, CREATOR OWNER, DA, EA
+    $broad  = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', "$dSid-513", "$dSid-515")                         # Everyone, Authenticated Users, Users, Domain Users, Domain Computers
+    $genericAll = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+
+    $aces = foreach ($ou in $lapsOUs) {
+        $sd = (Get-ADObject -Identity $ou -Properties nTSecurityDescriptor -Server $Server).nTSecurityDescriptor
+        foreach ($ace in $sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ("$($ace.AccessControlType)" -ne 'Allow' -or "$($ace.InheritanceType)" -eq 'None') { continue }
+            $sid = $ace.IdentityReference.Value
+            if ($sid -in $okSids) { continue }
+            if ($ace.InheritedObjectType -ne [guid]::Empty -and $ace.InheritedObjectType -ne $computerClass) { continue }
+            $r = $ace.ActiveDirectoryRights
+            $what = $null
+            if (($r -band $genericAll) -eq $genericAll) { $what = 'pełna kontrola (GenericAll)' }
+            elseif ($r -band [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) {
+                if ($ace.ObjectType -eq [guid]::Empty)          { $what = 'wszystkie prawa rozszerzone' }
+                elseif ($guidName.ContainsKey($ace.ObjectType)) { $what = "odczyt $($guidName[$ace.ObjectType])" }
+            }
+            if ($what) { [pscustomobject]@{ Sid = $sid; Uprawnienie = $what; Kontener = $ou } }
+        }
+    }
+    $rows = @($aces | Group-Object Sid, Uprawnienie | ForEach-Object {
+        $f = $_.Group[0]
+        $name = try { (New-Object System.Security.Principal.SecurityIdentifier $f.Sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $f.Sid }
+        [pscustomobject]@{ Podmiot = $name; Uprawnienie = $f.Uprawnienie; LiczbaKontenerow = @($_.Group | ForEach-Object { $_.Kontener } | Sort-Object -Unique).Count
+                           Przyklad = $f.Kontener; SID = $f.Sid }
+    })
+
+    Add-IfAny @{
+        Id = 'C-LAPS-READ-BROAD'; Category = $catComp; Severity = 'Critical'
+        Title = 'Hasła LAPS dostępne dla szerokich grup (np. Domain Users)'
+        Objects = ($rows | Where-Object { $_.SID -in $broad })
+        Description = 'Każdy użytkownik domeny (lub każdy komputer) może odczytać hasło lokalnego administratora komputerów z wymienionych kontenerów. LAPS w tej postaci nie chroni, tylko ułatwia przejęcie stacji i serwerów.'
+        Recommendation = 'Natychmiast usunąć uprawnienie; dostęp do haseł LAPS tylko dla dedykowanej grupy administratorów stacji/serwerów. Po zmianie wymusić rotację haseł.'
+        Fix = (Fx 'Find-LapsADExtendedRights -Identity ''<DN OU>''   # Windows LAPS: kto ma dostęp', 'Find-AdmPwdExtendedRights -Identity ''<OU>''   # LAPS legacy', 'dsacls "<DN kontenera>" /R "<grupa>"   # usuwa WSZYSTKIE ACE tej grupy - najpierw zweryfikować')
+        Mitre = 'T1555'
+    }
+    Add-IfAny @{
+        Id = 'C-LAPS-READERS'; Category = $catComp; Severity = 'Low'
+        Title = 'Podmioty z dostępem do haseł LAPS (do weryfikacji)'
+        Objects = ($rows | Where-Object { $_.SID -notin $broad })
+        Description = 'Grupy i konta spoza Domain/Enterprise Admins, które mogą odczytać hasła LAPS komputerów (bezpośrednio albo przez pełną kontrolę lub wszystkie prawa rozszerzone). Każde takie konto to ścieżka do lokalnego administratora na komputerach.'
+        Recommendation = 'Zweryfikować z klientem każdy wpis. Dostęp zostawić tylko dedykowanym grupom (np. helpdesk do stacji, osobna grupa do serwerów); usunąć konta imienne, konta serwisowe i pełną kontrolę nadaną "na wszelki wypadek".'
+        Fix = (Fx 'Find-LapsADExtendedRights -Identity ''<DN OU>''', 'dsacls "<DN kontenera>"   # pełna lista uprawnień')
+        Mitre = 'T1555'
+    }
+
+    # Weryfikacja wprost: czy konto, którym wykonano przegląd, widzi hasła. Filtr LDAP na atrybucie poufnym
+    # zwraca tylko obiekty, których atrybut konto może odczytać - wartości haseł nie są pobierane.
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $clear = @('ms-Mcs-AdmPwd', 'msLAPS-Password' | Where-Object { $lapsSchema.ContainsKey($_) })
+    if ($clear.Count -and $me.User.AccountDomainSid -and $me.User.AccountDomainSid.Value -eq $dSid -and -not $privSids[$me.User.Value]) {
+        $flt = '(|' + (($clear | ForEach-Object { "($_=*)" }) -join '') + ')'
+        Add-IfAny @{
+            Id = 'C-LAPS-READABLE'; Category = $catComp; Severity = 'High'
+            Title = "Konto użyte do przeglądu ($($me.Name)) odczytuje hasła LAPS"
+            Objects = (Get-ADComputer -LDAPFilter $flt -Properties OperatingSystem, LastLogonDate, whenCreated -Server $Server | ForEach-Object { ConvertTo-ComputerRow $_ })
+            Description = 'Konto spoza grup uprzywilejowanych, którym uruchomiono przegląd, ma dostęp do jawnych haseł lokalnego administratora tych komputerów. Wartości haseł nie zostały pobrane ani zapisane w raporcie.'
+            Recommendation = 'Ustalić, skąd pochodzi dostęp (patrz C-LAPS-READERS / C-LAPS-READ-BROAD) i czy jest uzasadniony dla tego konta.'
+            Fix = (Fx 'Find-LapsADExtendedRights -Identity ''<DN OU>''')
+            Mitre = 'T1555'
         }
     }
 }
@@ -876,6 +1009,257 @@ if (-not $SkipDCChecks) {
         Id = 'DC-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'; Title = 'Testy DC nierozstrzygnięte'; Objects = $dcUnk
         Description = 'Nie udało się ustalić wyniku (brak łączności, zapora lub brak dostępu). Powtórzyć z innej stacji lub z przełącznikiem -UseWinRM.'
     }
+}
+#endregion
+
+#region ---------- kondycja domeny i replikacja ----------
+# Wszystko zwykłym kontem: metadane replikacji przez ADWS, SYSVOL przez SMB, czas przez NTP (w32tm), DNS przez resolver stacji.
+$healthUnk = [System.Collections.Generic.List[object]]::new()
+$replErr = @{
+    5 = 'odmowa dostępu'; 1256 = 'system zdalny niedostępny'; 1396 = 'błąd logowania (SPN / konto komputera partnera)'
+    1722 = 'serwer RPC niedostępny (sieć, zapora, DC wyłączony)'; 1727 = 'zdalne wywołanie procedury nie powiodło się'
+    1908 = 'nie znaleziono kontrolera domeny'; 8453 = 'odmowa dostępu do replikacji'; 8456 = 'źródłowy DC odrzuca replikację'
+    8457 = 'docelowy DC odrzuca replikację'; 8524 = 'błąd DNS - nie można rozwiązać nazwy partnera'
+    8606 = 'obiekty zalegające (lingering objects)'; 8614 = 'przekroczony tombstone lifetime - DC odcięty zbyt długo'
+}
+
+Invoke-Check 'REPL' {
+    $tsl = (Get-ADObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$($rootDse.configurationNamingContext)" -Properties tombstoneLifetime -Server $Server).tombstoneLifetime
+    if (-not $tsl) { $tsl = 60 }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($dc in $dcs) {
+        try {
+            foreach ($m in @(Get-ADReplicationPartnerMetadata -Target $dc.HostName -Partition * -ErrorAction Stop)) {
+                $code = [int]$m.LastReplicationResult
+                $rows.Add([pscustomobject]@{
+                    DC            = $dc.HostName
+                    Partner       = (($m.Partner -split ',')[1]) -replace '^CN=', ''
+                    Partycja      = Get-NcName $m.Partition
+                    OstatniSukces = $(if ($m.LastReplicationSuccess) { $m.LastReplicationSuccess.ToString('yyyy-MM-dd HH:mm') } else { 'nigdy' })
+                    KolejneBledy  = $m.ConsecutiveReplicationFailureCount
+                    KodBledu      = $code
+                    Opis          = $(if ($code -eq 0) { '' } elseif ($replErr.ContainsKey($code)) { $replErr[$code] } else { "net helpmsg $code" })
+                    Sukces        = $m.LastReplicationSuccess
+                })
+            }
+        } catch {
+            $healthUnk.Add([pscustomobject]@{ DC = $dc.HostName; Test = 'Replikacja'; Blad = $_.Exception.Message })
+        }
+    }
+    $out = { $_ | Select-Object -Property * -ExcludeProperty Sukces }
+
+    Add-IfAny @{
+        Id = 'DC-REPL-FAIL'; Category = $catHealth; Severity = 'High'
+        Title = 'Błędy replikacji AD'
+        Objects = ($rows | Where-Object { $_.KodBledu -ne 0 -or $_.KolejneBledy -gt 0 } | ForEach-Object $out)
+        Description = 'Kontrolery domeny nie wymieniają zmian. Skutki: niespójne hasła i członkostwa w grupach, wyłączone konta nadal aktywne na części DC, niezastosowane GPO, a w skrajnym przypadku utrata DC.'
+        Recommendation = 'Usunąć przyczynę z kolumny Opis (najczęściej DNS, zapora, wyłączony lub odtworzony z migawki DC), potem wymusić replikację i sprawdzić ponownie.'
+        Fix = (Fx 'repadmin /replsummary', 'repadmin /showrepl * /errorsonly', 'dcdiag /e /test:replications /test:dns', 'repadmin /syncall /AdeP   # po usunięciu przyczyny')
+    }
+    Add-IfAny @{
+        Id = 'DC-REPL-STALE'; Category = $catHealth; Severity = 'High'
+        Title = 'Replikacja AD nieudana od ponad 24 godzin'
+        Objects = ($rows | Where-Object { $_.Sukces -and $_.Sukces -lt $now.AddHours(-24) -and $_.Sukces -ge $now.AddDays(-$tsl) } | ForEach-Object $out)
+        Description = "Ostatnia udana replikacja z partnerem była ponad dobę temu. Jeśli przekroczy tombstone lifetime ($tsl dni), DC trzeba będzie usunąć i promować od nowa."
+        Recommendation = 'Ustalić przyczynę (kolumny KodBledu/Opis, dcdiag) i przywrócić replikację, zanim upłynie tombstone lifetime.'
+        Fix = (Fx 'repadmin /showrepl <DC>', 'dcdiag /s:<DC> /v')
+    }
+    Add-IfAny @{
+        Id = 'DC-REPL-TSL'; Category = $catHealth; Severity = 'Critical'
+        Title = "Replikacja AD nieudana dłużej niż tombstone lifetime ($tsl dni)"
+        Objects = ($rows | Where-Object { $_.Sukces -and $_.Sukces -lt $now.AddDays(-$tsl) } | ForEach-Object $out)
+        Description = 'DC nie replikował dłużej niż czas przechowywania usuniętych obiektów. Ponowne włączenie replikacji grozi przywróceniem usuniętych kont i obiektów (lingering objects).'
+        Recommendation = 'Nie wymuszać replikacji. Odłączyć DC, usunąć jego metadane (ntdsutil metadata cleanup lub konsola ADUC), zainstalować i promować ponownie.'
+        Fix = (Fx '# NIE uruchamiać repadmin /syncall - najpierw izolacja DC', 'repadmin /removelingeringobjects <DC_docelowy> <GUID_DC_referencyjnego> <partycja> /advisory_mode')
+    }
+    if ($dcs.Count -eq 1) {
+        Add-Finding @{
+            Id = 'D-SINGLEDC'; Category = $catHealth; Severity = 'Medium'
+            Title = 'Domena ma tylko jeden kontroler domeny'
+            Objects = ($dcs | ForEach-Object { [pscustomobject]@{ DC = $_.HostName; System = $_.OperatingSystem } })
+            Description = 'Awaria jedynego DC zatrzymuje logowanie, DNS, GPO i dostęp do zasobów; odtworzenie zależy wyłącznie od kopii zapasowej.'
+            Recommendation = 'Dodać drugi kontroler domeny (najlepiej na innym hoście fizycznym/wirtualizacji) z rolą DNS i Global Catalog.'
+            Fix = (Fx 'Install-ADDSDomainController -DomainName {DOMENA} -InstallDns   # na nowym serwerze')
+        }
+    }
+}
+
+Invoke-Check 'BACKUP' {
+    $md = Get-ADReplicationAttributeMetadata -Object $domain.DistinguishedName -Properties dSASignature -Server $Server |
+          Where-Object AttributeName -eq 'dSASignature' | Select-Object -First 1
+    $last = if ($md) { $md.LastOriginatingChangeTime } else { $null }
+    if (-not $last -or $last -lt $now.AddDays(-7)) {
+        $txt = if ($last) { "ostatnia zarejestrowana: $(Format-Date $last), $([int]($now - $last).TotalDays) dni temu" } else { 'brak śladu kopii' }
+        Add-Finding @{
+            Id = 'D-BACKUP'; Category = $catHealth; Severity = 'High'
+            Title = "Brak aktualnej kopii zapasowej AD ($txt)"
+            Description = 'AD zapisuje datę ostatniej kopii wykonanej świadomie dla AD (VSS writer NTDS). Bez aktualnej kopii nie da się odtworzyć domeny po awarii, ransomware ani usunięciu obiektów. Uwaga: kopia całej maszyny wirtualnej bez przetwarzania aplikacyjnego (application-aware) nie aktualizuje tej daty i nie zawsze nadaje się do odtworzenia DC.'
+            Recommendation = 'Wykonywać codzienną kopię stanu systemu (System State) co najmniej dwóch DC lub kopię VM z przetwarzaniem aplikacyjnym; okresowo testować odtworzenie.'
+            Fix = (Fx 'wbadmin start systemstatebackup -backupTarget:<dysk>: -quiet   # na DC, przykład bez oprogramowania backupowego', 'repadmin /showbackup *')
+            Mitre = 'T1490'
+        }
+    }
+}
+
+Invoke-Check 'SYSVOL-FRS' {
+    Add-IfAny @{
+        Id = 'D-SYSVOL-FRS'; Category = $catHealth; Severity = 'High'
+        Title = 'SYSVOL replikowany przez przestarzały FRS'
+        Objects = ($dcs | Where-Object {
+                      -not (Get-ADObject -SearchBase $_.ComputerObjectDN -LDAPFilter '(&(objectClass=msDFSR-Subscription)(name=SYSVOL Subscription))' -Server $Server)
+                  } | ForEach-Object { [pscustomobject]@{ DC = $_.HostName; System = $_.OperatingSystem; Mechanizm = 'FRS (brak subskrypcji DFSR dla SYSVOL)' } })
+        Description = 'FRS jest wycofany i zawodny (rozjeżdżające się GPO i skrypty). Nowych DC z Windows Server 2019+ nie da się dodać do domeny z SYSVOL na FRS.'
+        Recommendation = 'Przeprowadzić migrację SYSVOL do DFSR (dfsrmig: Prepared, Redirected, Eliminated) przy zdrowej replikacji AD.'
+        Fix = (Fx 'dfsrmig /getglobalstate', 'dfsrmig /setglobalstate 1   # potem 2 i 3, po każdym kroku dfsrmig /getmigrationstate')
+    }
+}
+
+Invoke-Check 'FSMO' {
+    $dn = $domain.DistinguishedName
+    $roles = [ordered]@{
+        'PDC Emulator' = $dn; 'RID Master' = "CN=RID Manager`$,CN=System,$dn"; 'Infrastructure Master' = "CN=Infrastructure,$dn"
+        'Schema Master' = $rootDse.schemaNamingContext; 'Domain Naming Master' = "CN=Partitions,$($rootDse.configurationNamingContext)"
+    }
+    $dcNames = @($dcs | ForEach-Object { $_.Name })
+    Add-IfAny @{
+        Id = 'D-FSMO'; Category = $catHealth; Severity = 'Critical'
+        Title = 'Role FSMO przypisane do nieistniejącego kontrolera domeny'
+        Objects = @(foreach ($r in $roles.GetEnumerator()) {
+            $owner = (Get-ADObject -Identity $r.Value -Properties fSMORoleOwner -Server $Server).fSMORoleOwner
+            $srv   = (($owner -split ',')[1]) -replace '^CN=', ''
+            $domainRole = $r.Key -in 'PDC Emulator','RID Master','Infrastructure Master'
+            if ($owner -match 'DEL:' -or ($domainRole -and $srv -notin $dcNames)) {
+                [pscustomobject]@{ Rola = $r.Key; Wlasciciel = $owner }
+            }
+        })
+        Description = 'Rola jest przypisana do usuniętego lub nieistniejącego DC. Zależnie od roli: brak puli RID (nie da się tworzyć kont), problemy z czasem i zmianą haseł (PDC), brak zmian schematu lub domen.'
+        Recommendation = 'Przejąć rolę (seize) na działającym DC - tylko jeśli poprzedni właściciel na pewno nie wróci do sieci.'
+        Fix = (Fx 'netdom query fsmo', 'Move-ADDirectoryServerOperationMasterRole -Identity <DC> -OperationMasterRole <rola> -Force   # seize')
+    }
+}
+
+Invoke-Check 'DC-MACHINEPWD' {
+    Add-IfAny @{
+        Id = 'DC-MACHINEPWD'; Category = $catHealth; Severity = 'Medium'
+        Title = 'Kontrolery domeny z hasłem konta komputera starszym niż 45 dni'
+        Objects = ($dcs | ForEach-Object {
+            $c = Get-ADComputer -Identity $_.ComputerObjectDN -Properties PasswordLastSet, LastLogonDate -Server $Server
+            if ($c.PasswordLastSet -lt $now.AddDays(-45)) {
+                [pscustomobject]@{ DC = $_.HostName; HasloKontaUstawione = Format-Date $c.PasswordLastSet; OstatnieLogowanie = Format-Date $c.LastLogonDate }
+            } })
+        Description = 'DC zmienia hasło swojego konta co 30 dni. Brak zmiany oznacza zwykle DC wyłączony, odcięty od replikacji, odtworzony z migawki lub z wyłączoną zmianą hasła - wszystkie wymagają wyjaśnienia.'
+        Recommendation = 'Sprawdzić, czy DC działa i replikuje; jeśli DC już nie istnieje - usunąć jego metadane.'
+        Fix = (Fx 'dcdiag /s:<DC> /test:machineaccount', 'nltest /sc_verify:{DOMENA} /server:<DC>')
+    }
+}
+
+if (-not $SkipDCChecks) {
+    $smbDcs = [System.Collections.Generic.List[object]]::new()   # DC z działającym SMB - dla testu GPO
+
+    Invoke-Check 'DC-NET' {
+        $portRows  = [System.Collections.Generic.List[object]]::new()
+        $shareRows = [System.Collections.Generic.List[object]]::new()
+        $offsets   = @{}
+        foreach ($dc in $dcs) {
+            $h = $dc.HostName
+            $ports = [ordered]@{ '53' = 'DNS'; '88' = 'Kerberos'; '135' = 'RPC'; '389' = 'LDAP'; '445' = 'SMB'; '9389' = 'ADWS' }
+            if ($dc.IsGlobalCatalog) { $ports['3268'] = 'Global Catalog' }
+            $closed = @(foreach ($k in $ports.Keys) { if (-not (Test-TcpPort -Computer $h -Port ([int]$k))) { "$k ($($ports[$k]))" } })
+            if ($closed.Count) { $portRows.Add([pscustomobject]@{ DC = $h; NiedostepnePorty = ($closed -join ', ') }) }
+
+            if (-not ($closed | Where-Object { $_ -like '445 *' })) {
+                $smbDcs.Add($dc)
+                $miss = @(foreach ($sh in 'SYSVOL', 'NETLOGON') { if (-not [System.IO.Directory]::Exists("\\$h\$sh")) { $sh } })
+                if ($miss.Count) { $shareRows.Add([pscustomobject]@{ DC = $h; BrakUdzialu = ($miss -join ', ') }) }
+            }
+
+            # Przesunięcie czasu przez NTP (UDP 123); wynik względem stacji, potem przeliczany względem PDC
+            $w = (& w32tm.exe /stripchart "/computer:$h" /samples:1 /dataonly 2>$null) -join "`n"
+            $mt = [regex]::Match($w, '([+-]\d+[\.,]\d+)s')
+            if ($mt.Success) { $offsets[$h] = [double]($mt.Groups[1].Value -replace ',', '.') }
+            else { $healthUnk.Add([pscustomobject]@{ DC = $h; Test = 'Czas (NTP, UDP 123)'; Blad = 'brak odpowiedzi' }) }
+        }
+
+        Add-IfAny @{
+            Id = 'DC-PORTS'; Category = $catHealth; Severity = 'Medium'
+            Title = 'Kontrolery domeny z niedostępnymi usługami'
+            Objects = $portRows
+            Description = 'Ze stacji, z której wykonano przegląd, nie odpowiadają porty usług AD. Klienci w tej samej sieci mogą mieć problemy z logowaniem, GPO lub DNS. Przyczyną może też być zapora między stacją a DC - wynik należy porównać z innej podsieci.'
+            Recommendation = 'Sprawdzić, czy usługi działają na DC (DNS, KDC, Netlogon, ADWS) i czy zapora przepuszcza ruch AD z sieci klienckich.'
+            Fix = (Fx 'dcdiag /s:<DC> /test:services /test:advertising', 'Test-NetConnection <DC> -Port <port>')
+        }
+        Add-IfAny @{
+            Id = 'DC-SYSVOL-SHARE'; Category = $catHealth; Severity = 'High'
+            Title = 'Kontrolery domeny bez udziału SYSVOL lub NETLOGON'
+            Objects = $shareRows
+            Description = 'DC bez udziałów SYSVOL/NETLOGON nie dostarcza GPO ani skryptów logowania i nie ogłasza się jako pełnoprawny DC. Zwykle oznacza nieukończoną początkową replikację SYSVOL (DFSR) lub błąd po odtworzeniu DC.'
+            Recommendation = 'Sprawdzić stan replikacji SYSVOL (zdarzenia DFS Replication 4614/4604, 2213) i wartość SysvolReady na DC.'
+            Fix = (Fx 'dcdiag /s:<DC> /test:netlogons /test:sysvolcheck', 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters /v SysvolReady   # na DC', 'wmic /namespace:\\root\microsoftdfs path dfsrreplicatedfolderinfo get replicatedfoldername,state   # na DC')
+        }
+
+        $pdc = $domain.PDCEmulator
+        if ($offsets.Count -gt 1 -and $offsets.ContainsKey($pdc)) {
+            $ref = $offsets[$pdc]
+            $timeRows = @(foreach ($k in $offsets.Keys) {
+                $d = [math]::Round($offsets[$k] - $ref, 1)
+                if ([math]::Abs($d) -gt 60) { [pscustomobject]@{ DC = $k; RoznicaWzgledemPDC_s = $d } }
+            })
+            Add-IfAny @{
+                Id = 'DC-TIME'; Category = $catHealth
+                Severity = $(if (@($timeRows | Where-Object { [math]::Abs($_.RoznicaWzgledemPDC_s) -gt 300 }).Count) { 'High' } else { 'Medium' })
+                Title = 'Czas kontrolerów domeny różni się od PDC o ponad minutę'
+                Objects = $timeRows
+                Description = 'Kerberos odrzuca uwierzytelnienie przy różnicy czasu powyżej 5 minut. Rozjechany czas DC powoduje losowe błędy logowania i replikacji.'
+                Recommendation = 'DC synchronizują czas z hierarchii domeny (NT5DS), a tylko PDC Emulator z zewnętrznego źródła NTP. Na maszynach wirtualnych wyłączyć synchronizację czasu z hypervisorem.'
+                Fix = (Fx 'w32tm /config /syncfromflags:domhier /update   # na DC innym niż PDC', 'w32tm /config /manualpeerlist:"0.pl.pool.ntp.org 1.pl.pool.ntp.org" /syncfromflags:manual /reliable:yes /update   # na PDC', 'w32tm /resync /rediscover')
+            }
+        }
+    }
+
+    Invoke-Check 'GPO-SYNC' {
+        $gpos = @(Get-ADObject -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -SearchScope OneLevel `
+                  -LDAPFilter '(objectClass=groupPolicyContainer)' -Properties displayName, versionNumber -Server $Server)
+        $rows = foreach ($dc in $smbDcs) {
+            foreach ($g in $gpos) {
+                $ini = "\\$($dc.HostName)\SYSVOL\$($domain.DNSRoot)\Policies\$($g.Name)\GPT.INI"
+                try {
+                    $line = Get-Content -LiteralPath $ini -ErrorAction Stop | Where-Object { $_ -match '^\s*Version\s*=' } | Select-Object -First 1
+                    $v = if ($line) { [int](($line -split '=', 2)[1].Trim()) } else { 'brak wersji' }
+                }
+                catch [System.Management.Automation.ItemNotFoundException] { $v = 'brak folderu GPO' }
+                catch { continue }   # brak dostępu do odczytu - pomijamy
+                if ("$v" -ne "$($g.versionNumber)") {
+                    [pscustomobject]@{ GPO = $g.displayName; Guid = $g.Name; DC = $dc.HostName; WersjaAD = $g.versionNumber; WersjaSYSVOL = $v }
+                }
+            }
+        }
+        Add-IfAny @{
+            Id = 'D-GPO-SYNC'; Category = $catHealth; Severity = 'Medium'
+            Title = 'GPO niespójne między AD a SYSVOL'
+            Objects = $rows
+            Description = 'Wersja GPO zapisana w AD różni się od pliku GPT.INI w SYSVOL na kontrolerze domeny (lub folderu GPO brak). Komputery mogą otrzymywać nieaktualne lub różne ustawienia zależnie od DC. Pojedyncze różnice zaraz po edycji GPO są normalne - liczy się stan utrzymujący się.'
+            Recommendation = 'Sprawdzić replikację SYSVOL (DFSR) i AD; jeśli różnice się utrzymują - wykonać nieautorytatywną synchronizację SYSVOL na problematycznym DC.'
+            Fix = (Fx 'dcdiag /e /test:sysvolcheck /test:frssysvol', '# konsola GPMC > Status (Infrastructure Status) dla domeny', '# nieautorytatywna synchronizacja DFSR: msDFSR-Enabled=FALSE/TRUE na subskrypcji SYSVOL problematycznego DC (KB2218556)')
+        }
+    }
+
+    Invoke-Check 'DC-DNS' {
+        $srv = @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$($domain.DNSRoot)" -Type SRV -ErrorAction Stop |
+                 Where-Object { $_.Type -eq 'SRV' } | ForEach-Object { $_.NameTarget.TrimEnd('.') })
+        Add-IfAny @{
+            Id = 'DC-DNS-SRV'; Category = $catHealth; Severity = 'Medium'
+            Title = 'Kontrolery domeny bez rekordu SRV w DNS'
+            Objects = ($dcs | Where-Object { $_.HostName -notin $srv } | ForEach-Object { [pscustomobject]@{ DC = $_.HostName; Lokacja = $_.Site } })
+            Description = 'Klienci odnajdują kontrolery domeny przez rekordy SRV w DNS. DC bez rekordu nie jest używany do logowania, a jeśli DC już nie istnieje - jego brak może oznaczać nieusunięte metadane w AD.'
+            Recommendation = 'Na DC zrestartować usługę Netlogon (rejestruje rekordy SRV) i sprawdzić, czy DC używa poprawnych serwerów DNS; nieistniejące DC usunąć z AD.'
+            Fix = (Fx 'nltest /dsregdns   # na DC', 'Restart-Service Netlogon   # na DC', 'dcdiag /s:<DC> /test:dns /dnsrecordregistration')
+        }
+    }
+}
+
+Add-IfAny @{
+    Id = 'HEALTH-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'; Title = 'Testy kondycji nierozstrzygnięte'; Objects = $healthUnk
+    Description = 'Nie udało się odczytać części danych (brak łączności, zapora lub brak dostępu). Powtórzyć z innej stacji.'
 }
 #endregion
 
@@ -1097,7 +1481,7 @@ foreach ($f in $sorted) {
 [void]$sb.Append('</section>')
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
-[void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny. ')
+[void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, analizy uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")

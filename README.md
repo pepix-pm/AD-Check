@@ -124,11 +124,16 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | U-ADMINCOUNT | Low | Osierocone adminCount=1 | T1098 |
 | C-UNCONSTR | Critical | Komputery (nie-DC) z delegacją nieograniczoną | T1558 |
 | C-OS-EOL | High | Systemy bez wsparcia (Windows 7/8.1, Server ≤ 2012 R2, wycofane LTSC/SAC) | T1210 |
+| C-LAPS-READ-BROAD | Critical | Hasła LAPS czytelne dla szerokich grup (Domain Users, Authenticated Users…) | T1555 |
 | C-LAPS-NONE | High | Brak LAPS w schemacie | T1550.002 |
+| C-LAPS-READABLE | High | Konto użyte do przeglądu (nieuprzywilejowane) widzi hasła LAPS | T1555 |
 | C-OS-W10 | Medium | Windows 10 (poza LTSC) | T1210 |
 | C-OS-FEATURE | Medium | Windows 11 w wersji bez wsparcia (np. 23H2 Pro) | T1210 |
 | C-OS-SOON | Medium | Serwery/LTSC z końcem wsparcia w ciągu 12 miesięcy | T1210 |
 | C-LAPS-MISSING | Medium | Komputery bez hasła LAPS | T1550.002 |
+| C-LAPS-EXPIRED | Medium | Hasło LAPS przestało się zmieniać (wygasło, a komputer był w sieci) | T1550.002 |
+| C-LAPS-LEGACY | Low | Komputery na wycofanym Microsoft LAPS (legacy) | T1550.002 |
+| C-LAPS-READERS | Low | Kto spoza DA/EA może czytać hasła LAPS (ACL na OU) – do weryfikacji | T1555 |
 | C-MAQ | Medium | MachineAccountQuota > 0 | T1136.002 |
 | C-STALE | Low | Nieużywane konta komputerów | T1078.002 |
 | D-RECYCLE | Medium | Kosz AD wyłączony | – |
@@ -143,6 +148,27 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-LDAPSIGN | Medium | Podpisywanie LDAP niewymagane | T1557 |
 | DC-LDAPCBT | Medium | LDAP channel binding niewymuszony | T1557 |
 | DC-NTLMV1 | Medium | DC akceptuje NTLMv1/LM | T1557.001 |
+| DC-REPL-TSL | Critical | Replikacja nieudana dłużej niż tombstone lifetime | – |
+| D-FSMO | Critical | Role FSMO przypisane do nieistniejącego DC | – |
+| DC-REPL-FAIL | High | Błędy replikacji AD (z opisem kodu błędu) | – |
+| DC-REPL-STALE | High | Replikacja nieudana od ponad 24 h | – |
+| D-BACKUP | High | Brak kopii zapasowej AD w ciągu 7 dni (atrybut dSASignature) | T1490 |
+| D-SYSVOL-FRS | High | SYSVOL replikowany przez FRS | – |
+| DC-SYSVOL-SHARE | High | DC bez udziału SYSVOL/NETLOGON | – |
+| DC-TIME | High / Medium | Czas DC różni się od PDC o > 5 min / > 1 min | – |
+| D-SINGLEDC | Medium | Tylko jeden kontroler domeny | – |
+| DC-MACHINEPWD | Medium | Hasło konta komputera DC starsze niż 45 dni | – |
+| DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
+| D-GPO-SYNC | Medium | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC | – |
+| DC-DNS-SRV | Medium | DC bez rekordu SRV `_ldap._tcp.dc._msdcs` | – |
+
+## LAPS
+
+Skrypt rozpoznaje LAPS legacy (`ms-Mcs-AdmPwd`) i Windows LAPS (`msLAPS-*`). Sprawdza pokrycie, rotację haseł (data wygaśnięcia vs ostatnie logowanie komputera) oraz **kto może odczytać hasła** – z ACL kontenerów, w których są komputery (prawo rozszerzone do atrybutu hasła, wszystkie prawa rozszerzone, pełna kontrola). Sprawdza też, czy konto użyte do przeglądu widzi hasła: filtr LDAP zwraca tylko komputery z czytelnym hasłem – **wartości haseł nie są pobierane ani zapisywane**. Nie są analizowane uprawnienia nadane bezpośrednio na pojedynczych obiektach komputerów ani właściciel obiektu.
+
+## Kondycja domeny i replikacja
+
+Testy działają na zwykłym koncie: metadane replikacji przez AD Web Services, udziały i `GPT.INI` przez SMB, czas przez NTP (`w32tm /stripchart`, UDP 123), rekordy SRV przez DNS stacji. Testy sieciowe (porty, udziały, czas, GPO, DNS) pomija `-SkipDCChecks`. Różnica czasu liczona jest względem PDC Emulatora, więc zegar stacji nie wpływa na wynik. Wynik testów sieciowych zależy od zapór między stacją a DC.
 
 ## Wersje systemów
 
