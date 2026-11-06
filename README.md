@@ -58,19 +58,11 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 
 ## Uruchomienie z GitHuba (bez kopiowania pliku)
 
-Repozytorium jest prywatne, więc pobranie wymaga tokenu. Użyj **fine-grained PAT** tylko do odczytu:
-GitHub → Settings → Developer settings → Fine-grained tokens → *Repository access: Only select repositories* → `AD-Check`, *Permissions: Contents = Read-only*, ważność np. 90 dni. Token trzymaj w Keeperze. Nigdy nie wklejaj go jako tekstu do polecenia – zostałby w historii PowerShella na serwerze klienta.
-
-Wklej w PowerShellu na serwerze/stacji w domenie klienta:
+Repozytorium jest publiczne – token nie jest potrzebny. Wklej w PowerShellu na stacji w domenie klienta:
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$wc = New-Object Net.WebClient
-$wc.Headers['Authorization'] = 'token ' + [Net.NetworkCredential]::new('', (Read-Host 'Token GitHub' -AsSecureString)).Password
-$wc.Headers['Accept'] = 'application/vnd.github.raw'
-$wc.Headers['User-Agent'] = 'PEPIX-ADCheck'
-$adcheck = [scriptblock]::Create([Text.Encoding]::UTF8.GetString($wc.DownloadData('https://api.github.com/repos/pepix-pm/AD-Check/contents/PEPIX-ADCheck.ps1')).TrimStart([char]0xFEFF))
-$wc.Dispose()
+$adcheck = [scriptblock]::Create([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1')).TrimStart([char]0xFEFF))
 & $adcheck -Klient KLIENT
 ```
 
@@ -79,8 +71,9 @@ Kolejne uruchomienia w tej samej sesji: `& $adcheck -Klient KLIENT -UseWinRM` it
 Uwagi:
 - Zamiast `iex (irm ...)` używany jest `& ([scriptblock]::Create(...))` – tylko tak da się przekazać parametry (`-Klient`, `-UseWinRM`…). Działa niezależnie od ExecutionPolicy i nie zostawia pliku skryptu na dysku.
 - Treść jest dekodowana jawnie jako UTF-8 – Windows PowerShell bez tego psuje polskie znaki.
-- Konkretną wersję zamiast `main` pobierzesz, dopisując `?ref=v0.4` do adresu.
-- Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je z serwera klienta.
+- U klienta używaj konkretnej, sprawdzonej wersji: zamień `main` w adresie na tag, np. `v0.5`. `main` może zawierać zmiany jeszcze nieprzetestowane.
+- Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je ze stacji.
+- **Repozytorium jest publiczne** – tym bardziej obowiązuje zasada: żadnych nazw klientów, domen, kont ani wyników w repo.
 
 ## Wyniki
 
