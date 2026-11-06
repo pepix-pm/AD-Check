@@ -53,11 +53,16 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 Repozytorium jest publiczne – token nie jest potrzebny. Wklej w PowerShellu na stacji w domenie klienta:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
 
-Na starszych serwerach (2012 R2/2016) przy błędzie połączenia SSL/TLS najpierw:
-`[Net.ServicePointManager]::SecurityProtocol = 'Tls12'`
+Pierwsza część włącza TLS 1.2 – bez niej Windows Server 2012 R2/2016 nie połączy się z GitHubem („Nie można utworzyć bezpiecznego kanału SSL/TLS”). Na Windows 10/11 nie przeszkadza.
+
+Sprawdzenie składni bez uruchamiania (np. po zmianach w repo):
+
+```powershell
+$e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF), [ref]$null, [ref]$e); $e | Format-List Message, @{n='Linia';e={$_.Extent.StartLineNumber}}, @{n='Kod';e={$_.Extent.Text}}
+```
 
 Uwagi:
 - Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
