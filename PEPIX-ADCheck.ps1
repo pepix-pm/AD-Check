@@ -2208,7 +2208,8 @@ $nis2Rows = @(Get-ComplianceRows $nis2Names 'N')
 $isoRows  = @(Get-ComplianceRows $isoNames 'I')
 
 # Plan naprawczy: znaleziska w etapach, kolejność wg wagi
-$planRows = @(foreach ($f in $real) {
+# $( ) wokół foreach: instrukcji foreach nie można bezpośrednio przekazać do potoku
+$planRows = @($(foreach ($f in $real) {
     $pm   = $planMeta[$f.Id]
     $etap = if ($pm) { [int]$pm[2] } else { 2 }
     if ($f.Severity -eq 'Critical') { $etap = 1 }
@@ -2217,7 +2218,7 @@ $planRows = @(foreach ($f in $real) {
         GodzinyMin = $(if ($pm) { [double]$pm[0] } else { $null }); GodzinyMax = $(if ($pm) { [double]$pm[1] } else { $null })
         Uwagi = $(if ($pm) { $pm[3] } else { 'Brak szacunku - do oceny' })
     }
-} | Sort-Object Etap, { $sevOrder[$_.Waga] }, Id)
+}) | Sort-Object Etap, { $sevOrder[$_.Waga] }, Id)
 $planSum = @{}
 foreach ($k in 1..3) {
     $g = @($planRows | Where-Object Etap -eq $k)
