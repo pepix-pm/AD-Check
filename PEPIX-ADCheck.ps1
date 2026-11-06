@@ -2401,7 +2401,7 @@ footer img{height:18px;vertical-align:middle;margin-right:6px}
 <script>
 function toggleAll(o){document.querySelectorAll('details').forEach(d=>d.open=o)}
 window.addEventListener('beforeprint',()=>toggleAll(true));
-// Przycisk "Kopiuj" przy każdym bloku kodu; zapasowo execCommand, gdy schowek API jest niedostępny (np. stary przeglądarka / file://)
+// Przycisk "Kopiuj" przy każdym bloku kodu; zapasowo execCommand, gdy schowek API jest niedostępny (np. starsza przeglądarka lub file://)
 function copyText(t){
   if(navigator.clipboard&&window.isSecureContext){return navigator.clipboard.writeText(t)}
   return new Promise(function(ok,err){var a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';
