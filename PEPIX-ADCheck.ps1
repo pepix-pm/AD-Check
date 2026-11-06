@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.10)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.11)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.10'
+$Version = '0.11'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -286,6 +286,64 @@ $ruleCatalog = @(
     @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
     @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
 )
+# ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
+# Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
+# To wskazanie, których środków dotyczy znalezisko techniczne AD - nie ocena zgodności podmiotu.
+$nis2Names = [ordered]@{
+    a = 'Analiza ryzyka i polityki bezpieczeństwa systemów informacyjnych'
+    b = 'Obsługa incydentów'
+    c = 'Ciągłość działania: kopie zapasowe, odtwarzanie, zarządzanie kryzysowe'
+    d = 'Bezpieczeństwo łańcucha dostaw'
+    e = 'Bezpieczeństwo nabywania, rozwoju i utrzymania systemów, w tym obsługa podatności'
+    f = 'Ocena skuteczności środków zarządzania ryzykiem'
+    g = 'Podstawowa cyberhigiena i szkolenia'
+    h = 'Kryptografia i szyfrowanie'
+    i = 'Bezpieczeństwo zasobów ludzkich, kontrola dostępu i zarządzanie aktywami'
+    j = 'Uwierzytelnianie wieloskładnikowe i zabezpieczona łączność'
+}
+$isoNames = [ordered]@{
+    '5.9'  = 'Inwentarz informacji i innych powiązanych aktywów'
+    '5.15' = 'Kontrola dostępu'
+    '5.16' = 'Zarządzanie tożsamością'
+    '5.17' = 'Informacje uwierzytelniające'
+    '5.18' = 'Prawa dostępu'
+    '5.19' = 'Bezpieczeństwo informacji w relacjach z dostawcami'
+    '8.2'  = 'Uprzywilejowane prawa dostępu'
+    '8.5'  = 'Bezpieczne uwierzytelnianie'
+    '8.8'  = 'Zarządzanie podatnościami technicznymi'
+    '8.9'  = 'Zarządzanie konfiguracją'
+    '8.13' = 'Kopie zapasowe informacji'
+    '8.14' = 'Nadmiarowość środków przetwarzania informacji'
+    '8.15' = 'Rejestrowanie zdarzeń'
+    '8.16' = 'Działania monitorujące'
+    '8.17' = 'Synchronizacja zegarów'
+    '8.20' = 'Bezpieczeństwo sieci'
+    '8.24' = 'Stosowanie kryptografii'
+}
+$complianceMap = @{
+    'Nieaktywne konta'             = @{ N = 'i';    I = '5.16, 5.18' }
+    'Konfiguracja kont'            = @{ N = 'g, i'; I = '5.17, 8.5' }
+    'Przestarzałe systemy'         = @{ N = 'e';    I = '5.9, 8.8' }
+    'Zarządzanie poprawkami'       = @{ N = 'e';    I = '8.8' }
+    'Przestarzałe protokoły'       = @{ N = 'e, h'; I = '8.5, 8.24' }
+    'Replikacja i kondycja'        = @{ N = 'c, e'; I = '8.9, 8.14, 8.17' }
+    'Grupy uprzywilejowane'        = @{ N = 'i';    I = '5.15, 8.2' }
+    'Ochrona kont administratorów' = @{ N = 'i, j'; I = '5.17, 8.2' }
+    'Delegacja'                    = @{ N = 'i';    I = '8.2, 8.9' }
+    'Dostęp do haseł LAPS'         = @{ N = 'i';    I = '5.15, 5.17' }
+    'Prawa na kontrolerach domeny' = @{ N = 'i';    I = '8.2, 8.9' }
+    'Filtrowanie SID'              = @{ N = 'd, i'; I = '5.15, 5.19' }
+    'Szyfrowanie zaufań'           = @{ N = 'd, h'; I = '5.19, 8.24' }
+    'Golden Ticket'                = @{ N = 'h, i'; I = '5.17, 8.2' }
+    'Pass-the-hash'                = @{ N = 'i';    I = '5.17, 8.5' }
+    'Łamanie haseł'                = @{ N = 'g, i'; I = '5.17, 8.5' }
+    'Przechwytywanie i relay'      = @{ N = 'h, j'; I = '8.20, 8.24' }
+    'Audyt'                        = @{ N = 'b, f'; I = '8.15, 8.16' }
+    'Utwardzenie DC'               = @{ N = 'e, g'; I = '8.9' }
+    'Kopia i odtwarzanie'          = @{ N = 'c';    I = '8.13' }
+    'Inne'                         = @{ N = 'a';    I = '' }
+}
+
 $ruleMeta = @{}
 foreach ($r in $ruleCatalog) { $ruleMeta[$r.Id] = $r }
 $sevLevel = @{ Critical = 1; High = 2; Medium = 3; Low = 4; Info = 5 }
@@ -306,7 +364,13 @@ function Add-Finding([hashtable]$F) {
         Obszar         = $(if ($F.Severity -eq 'Info') { 'Informacje' } elseif ($rule) { $areaNames[$rule.O] } else { $areaNames['A'] })
         Model          = $(if ($rule) { $rule.M } else { 'Inne' })
         Poziom         = $sevLevel[$F.Severity]
+        NIS2           = ''
+        ISO27001       = ''
         Objects        = $obj
+    }
+    if ($F.Severity -ne 'Info' -and $complianceMap.ContainsKey($row.Model)) {
+        $row.NIS2     = $complianceMap[$row.Model].N
+        $row.ISO27001 = $complianceMap[$row.Model].I
     }
     $findings.Add($row)
 }
@@ -2040,6 +2104,22 @@ $matrix = @(foreach ($k in $areaNames.Keys) {
     }
 })
 
+# Zestawienie zgodności: dla każdego środka NIS2 / zabezpieczenia ISO - liczba testów AD, znaleziska i punkty
+function Get-ComplianceRows($Names, [string]$Key) {
+    $prop = if ($Key -eq 'N') { 'NIS2' } else { 'ISO27001' }
+    foreach ($c in $Names.Keys) {
+        $tests = @($ruleCatalog | Where-Object { $m = $complianceMap[$_.M]; $m -and (($m[$Key] -split ',\s*') -contains $c) }).Count
+        $g     = @($real | Where-Object { (([string]$_.$prop) -split ',\s*') -contains $c })
+        [pscustomobject]@{
+            Kod = $c; Nazwa = $Names[$c]; TestyAD = $tests; Znaleziska = $g.Count
+            Punkty = [int](($g | ForEach-Object { $weights[$_.Severity] } | Measure-Object -Sum).Sum)
+            Ids = @($g | ForEach-Object { $_.Id })
+        }
+    }
+}
+$nis2Rows = @(Get-ComplianceRows $nis2Names 'N')
+$isoRows  = @(Get-ComplianceRows $isoNames 'I')
+
 $diff = $null
 if ($Previous) {
     $prev    = Get-Content $Previous -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -2098,11 +2178,12 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
 [ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted; Reguly = $ruleStatus
+            Zgodnosc = [ordered]@{ NIS2 = $nis2Rows; ISO27001 = $isoRows }
             Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
-$sorted | Select-Object Id, Obszar, Model, Poziom, Category, Severity, Title, Count, Recommendation, Mitre |
+$sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, Category, Severity, Title, Count, Recommendation, Mitre |
     Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
@@ -2242,6 +2323,25 @@ foreach ($a in $areaScore.Keys) {
 }
 [void]$sb.Append('</div></section>')
 
+function Add-ComplianceTable($Rows, [string]$Prefix) {
+    [void]$sb.Append('<div class="tw"><table><thead><tr><th>Stan</th><th>Środek / zabezpieczenie</th><th>Testy AD</th><th>Znaleziska</th><th>Pkt</th><th>ID znalezisk</th></tr></thead><tbody>')
+    foreach ($r in $Rows) {
+        $st = if ($r.TestyAD -eq 0) { '<span class="st st-na">poza zakresem</span>' }
+              elseif ($r.Znaleziska -eq 0) { '<span class="st st-ok">brak uwag</span>' }
+              else { "<span class=`"st mc $(Get-ScoreClass $r.Punkty)`">wymaga działań</span>" }
+        $ids = ($r.Ids | ForEach-Object { "<a href=`"#$(HtmlEnc $_)`">$(HtmlEnc $_)</a>" }) -join ', '
+        [void]$sb.Append("<tr><td>$st</td><td><b>$Prefix$(HtmlEnc $r.Kod)</b> $(HtmlEnc $r.Nazwa)</td><td>$($r.TestyAD)</td><td>$($r.Znaleziska)</td><td>$($r.Punkty)</td><td>$ids</td></tr>")
+    }
+    [void]$sb.Append('</tbody></table></div>')
+}
+[void]$sb.Append('<section><h2>Odniesienie do NIS2 / UKSC i ISO/IEC 27001</h2>')
+[void]$sb.Append('<p class="note">Znaleziska przypisano do środków zarządzania ryzykiem z art. 21 ust. 2 dyrektywy NIS2 (wdrożonych w ustawie o krajowym systemie cyberbezpieczeństwa, Dz. U. 2026 poz. 252) oraz do zabezpieczeń z załącznika A normy ISO/IEC 27001:2022. Zestawienie pokazuje, których wymagań dotyczą techniczne problemy Active Directory; nie jest oceną zgodności podmiotu ani audytem NIS2/UKSC. „Poza zakresem” oznacza środek, którego przegląd AD nie weryfikuje.</p>')
+[void]$sb.Append('<div class="lbl">NIS2 art. 21 ust. 2 / UKSC – środki zarządzania ryzykiem</div>')
+Add-ComplianceTable $nis2Rows 'lit. '
+[void]$sb.Append('<div class="lbl">ISO/IEC 27001:2022 – załącznik A</div>')
+Add-ComplianceTable $isoRows 'A.'
+[void]$sb.Append('</section>')
+
 [void]$sb.Append('<section><h2>Podsumowanie według kategorii</h2>')
 [void]$sb.Append((ConvertTo-HtmlTable $summary))
 [void]$sb.Append('</section>')
@@ -2258,6 +2358,10 @@ foreach ($f in $sorted) {
     [void]$sb.Append("<section class=`"f $sev`" id=`"$(HtmlEnc $f.Id)`"><h3>$(Badge $f.Severity) $(HtmlEnc $f.Title)</h3>")
     $mitre = if ($f.Mitre) { " &nbsp;|&nbsp; MITRE ATT&amp;CK: $(Get-MitreLink $f.Mitre)" } else { '' }
     [void]$sb.Append("<div class=`"meta`">$(HtmlEnc $f.Obszar) / $(HtmlEnc $f.Model) &nbsp;|&nbsp; $(HtmlEnc $f.Category) &nbsp;|&nbsp; ID: $(HtmlEnc $f.Id) &nbsp;|&nbsp; Punkty: $($weights[$f.Severity]) &nbsp;|&nbsp; Poziom dojrzałości: $($f.Poziom)$mitre</div>")
+    if ($f.NIS2 -or $f.ISO27001) {
+        $iso = (($f.ISO27001 -split ',\s*') | Where-Object { $_ } | ForEach-Object { "A.$_" }) -join ', '
+        [void]$sb.Append("<div class=`"meta`">NIS2 art. 21 ust. 2 / UKSC: lit. $(HtmlEnc $f.NIS2) &nbsp;|&nbsp; ISO/IEC 27001:2022: $(HtmlEnc $iso)</div>")
+    }
     if ($f.Description)    { [void]$sb.Append("<div class=`"lbl`">Ryzyko</div><div>$(HtmlEnc $f.Description)</div>") }
     if ($f.Recommendation) { [void]$sb.Append("<div class=`"lbl`">Zalecenie</div><div>$(HtmlEnc $f.Recommendation)</div>") }
     if ($f.Fix)            { [void]$sb.Append("<div class=`"lbl`">Przykładowa naprawa (do weryfikacji przed wykonaniem)</div><pre>$(HtmlEnc $f.Fix)</pre>") }
