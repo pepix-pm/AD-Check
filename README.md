@@ -36,8 +36,11 @@ clear
 Docelowo skrypt uruchamiany jest ze stacji roboczej. Jednorazowo, w PowerShellu **jako administrator**:
 
 ```powershell
-Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
+Add-WindowsCapability -Online -Name 'Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
+Get-WindowsCapability -Online -Name 'Rsat.ActiveDirectory*' | Select-Object Name, State   # oczekiwane: Installed
 ```
+
+Nazwa musi być pełna, z `~~~~0.0.1.0` – bez tej końcówki polecenie kończy się bez błędu, ale nic nie instaluje.
 
 Moduł pobiera się z Windows Update. Jeśli stacja korzysta z WSUS, instalacja kończy się błędem `0x800f0954` – wtedy włącz w GPO/lokalnych zasadach *Computer Configuration > Administrative Templates > System > Specify settings for optional component installation and component repair* z opcją pobierania bezpośrednio z Windows Update.
 

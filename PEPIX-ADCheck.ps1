@@ -44,7 +44,7 @@ if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
     $braki.Add('System inny niż Windows - moduł ActiveDirectory, SYSVOL i testy DC wymagają Windows.')
 }
 if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    $hint = 'Windows 10/11 (PowerShell jako administrator, pobiera z Windows Update): Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0  (błąd 0x800f0954 = stacja pod WSUS, patrz README)'
+    $hint = 'Windows 10/11 (PowerShell jako administrator, pobiera z Windows Update): Add-WindowsCapability -Online -Name ''Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'' (pełna nazwa z ~~~~0.0.1.0 - bez niej polecenie nic nie instaluje i nie zgłasza błędu); sprawdzenie: Get-WindowsCapability -Online -Name ''Rsat.ActiveDirectory*'' (State = Installed); błąd 0x800f0954 = stacja pod WSUS, patrz README'
     try {
         if ((Get-CimInstance Win32_OperatingSystem -Verbose:$false).ProductType -ne 1) { $hint = 'serwer: Install-WindowsFeature RSAT-AD-PowerShell' }
     } catch { $hint = "serwer: Install-WindowsFeature RSAT-AD-PowerShell; $hint" }
