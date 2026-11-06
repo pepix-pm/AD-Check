@@ -4,12 +4,12 @@ Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **z
 
 ## Wymagania
 
-- Windows z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
-- Moduł RSAT `ActiveDirectory`
-- Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: AD Web Services (TCP 9389), SMB/SYSVOL (TCP 445)
+- Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
+- **Bez RSAT i bez instalowania czegokolwiek** – AD jest odczytywane przez LDAP (`System.DirectoryServices`, wbudowane w Windows)
+- Stacja w domenie (lub `-Server`) z dostępem do kontrolerów domeny: LDAP (TCP 389), SMB/SYSVOL (TCP 445), DNS domeny
 - Zwykłe konto domenowe; konto z uprawnieniami admina na DC tylko w trybie `-UseWinRM`
 
-Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz, z podpowiedzią instalacji modułu.
+Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
 
 ## Użycie
 
@@ -33,18 +33,7 @@ clear
 
 ## Stacja robocza Windows 10/11
 
-Docelowo skrypt uruchamiany jest ze stacji roboczej. Jednorazowo, w PowerShellu **jako administrator**:
-
-```powershell
-Add-WindowsCapability -Online -Name 'Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
-Get-WindowsCapability -Online -Name 'Rsat.ActiveDirectory*' | Select-Object Name, State   # oczekiwane: Installed
-```
-
-Nazwa musi być pełna, z `~~~~0.0.1.0` – bez tej końcówki polecenie kończy się bez błędu, ale nic nie instaluje.
-
-Moduł pobiera się z Windows Update. Jeśli stacja korzysta z WSUS, instalacja kończy się błędem `0x800f0954` – wtedy włącz w GPO/lokalnych zasadach *Computer Configuration > Administrative Templates > System > Specify settings for optional component installation and component repair* z opcją pobierania bezpośrednio z Windows Update.
-
-Samo uruchomienie skryptu nie wymaga uprawnień administratora stacji.
+Skrypt nie wymaga RSAT ani uprawnień administratora na stacji – wystarczy zwykły PowerShell.
 
 **Stacja w domenie klienta** – zaloguj się kontem domenowym i uruchom bez `-Server`.
 
@@ -213,7 +202,7 @@ Skrypt rozpoznaje LAPS legacy (`ms-Mcs-AdmPwd`) i Windows LAPS (`msLAPS-*`). Spr
 
 ## Kondycja domeny i replikacja
 
-Testy działają na zwykłym koncie: metadane replikacji przez AD Web Services, udziały i `GPT.INI` przez SMB, czas przez NTP (`w32tm /stripchart`, UDP 123), rekordy SRV przez DNS stacji. Testy sieciowe (porty, udziały, czas, GPO, DNS) pomija `-SkipDCChecks`. Różnica czasu liczona jest względem PDC Emulatora, więc zegar stacji nie wpływa na wynik. Wynik testów sieciowych zależy od zapór między stacją a DC.
+Testy działają na zwykłym koncie: metadane replikacji przez LDAP z każdego DC (`msDS-NCReplInboundNeighbors`), udziały i `GPT.INI` przez SMB, czas przez NTP (`w32tm /stripchart`, UDP 123), rekordy SRV przez DNS stacji. Testy sieciowe (porty, udziały, czas, GPO, DNS) pomija `-SkipDCChecks`. Różnica czasu liczona jest względem PDC Emulatora, więc zegar stacji nie wpływa na wynik. Wynik testów sieciowych zależy od zapór między stacją a DC.
 
 ## Wersje systemów
 

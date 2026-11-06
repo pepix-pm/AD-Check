@@ -1,9 +1,9 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.14)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.15)
 
 .DESCRIPTION
-    Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
+    Uruchamiać ze stacji w domenie klienta. Nie wymaga RSAT: AD odczytywane przez LDAP (System.DirectoryServices).
     Domyślnie WYSTARCZY ZWYKŁE KONTO DOMENOWE:
       - dane katalogowe: zapytania LDAP,
       - Print Spooler na DC: test potoku \\DC\pipe\spoolss,
@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.14'
+$Version = '0.15'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -41,14 +41,7 @@ $Version = '0.14'
 $braki = [System.Collections.Generic.List[string]]::new()
 
 if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
-    $braki.Add('System inny niż Windows - moduł ActiveDirectory, SYSVOL i testy DC wymagają Windows.')
-}
-if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    $hint = 'Windows 10/11 (PowerShell jako administrator, pobiera z Windows Update): Add-WindowsCapability -Online -Name ''Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'' (pełna nazwa z ~~~~0.0.1.0 - bez niej polecenie nic nie instaluje i nie zgłasza błędu); sprawdzenie: Get-WindowsCapability -Online -Name ''Rsat.ActiveDirectory*'' (State = Installed); błąd 0x800f0954 = stacja pod WSUS, patrz README'
-    try {
-        if ((Get-CimInstance Win32_OperatingSystem -Verbose:$false).ProductType -ne 1) { $hint = 'serwer: Install-WindowsFeature RSAT-AD-PowerShell' }
-    } catch { $hint = "serwer: Install-WindowsFeature RSAT-AD-PowerShell; $hint" }
-    $braki.Add("Brak modułu ActiveDirectory (RSAT). Instalacja - $hint")
+    $braki.Add('System inny niż Windows - odczyt AD (System.DirectoryServices), SYSVOL i testy DC wymagają Windows.')
 }
 if (-not $Server) {
     $braki.Add('Nie ustalono domeny: stacja/konto poza domeną. Podaj -Server <domena lub DC>.')
@@ -58,10 +51,20 @@ if ($Previous -and -not (Test-Path -LiteralPath $Previous -PathType Leaf)) {
 }
 
 if ($braki.Count -eq 0) {
-    Import-Module ActiveDirectory -Verbose:$false
-    try { $domain = Get-ADDomain -Server $Server }
-    catch {
-        $braki.Add("Brak połączenia z AD ($Server): $($_.Exception.Message). Wymagany dostęp do usługi AD Web Services na DC (TCP 9389) oraz DNS domeny.")
+    # Odczyt AD przez LDAP (System.DirectoryServices, wbudowane w Windows) - bez modułu RSAT ActiveDirectory
+    try {
+        $rde = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Server/RootDSE")
+        $rootDse = [pscustomobject]@{
+            defaultNamingContext       = [string]$rde.Properties['defaultNamingContext'].Value
+            configurationNamingContext = [string]$rde.Properties['configurationNamingContext'].Value
+            schemaNamingContext        = [string]$rde.Properties['schemaNamingContext'].Value
+            rootDomainNamingContext    = [string]$rde.Properties['rootDomainNamingContext'].Value
+            dnsHostName                = [string]$rde.Properties['dnsHostName'].Value
+        }
+        $rde.Dispose()
+        if (-not $rootDse.defaultNamingContext) { throw 'pusta odpowiedź RootDSE' }
+    } catch {
+        $braki.Add("Brak połączenia LDAP z domeną ($Server): $($_.Exception.Message). Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.")
     }
 }
 if ($braki.Count -gt 0) {
@@ -76,11 +79,218 @@ if (-not $OutDir) {
 $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
 #endregion
 
+#region ---------- dostęp do AD przez LDAP ----------
+# System.DirectoryServices zamiast modułu ActiveDirectory: działa na każdym Windows bez RSAT i bez uprawnień admina na stacji.
+# Obiekty dostają te same nazwy właściwości co z modułu AD (SID, Enabled, PasswordLastSet, LastLogonDate, ...),
+# a atrybuty LDAP są dostępne pod własnymi nazwami (wielkość liter bez znaczenia).
+$LdapServer = $Server
+$domainDn   = $rootDse.defaultNamingContext
+$ldapMulti  = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl',
+                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl')
+
+function ConvertTo-LdapFilterValue([string]$Value) {
+    $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
+}
+function ConvertFrom-DnToDns([string]$Dn) {
+    (($Dn -split ',') | Where-Object { $_ -match '^DC=' } | ForEach-Object { $_.Substring(3) }) -join '.'
+}
+function ConvertFrom-LdapTime([string]$Text) {
+    if (-not $Text) { return $null }
+    $t = [datetimeoffset]::Parse($Text, [System.Globalization.CultureInfo]::InvariantCulture).LocalDateTime
+    if ($t.Year -le 1601) { $null } else { $t }
+}
+
+# Wynik wyszukiwania LDAP (ResultPropertyCollection lub hashtable w testach) -> obiekt jak z modułu AD
+function ConvertFrom-LdapResult($P) {
+    $names = if ($P -is [System.Collections.IDictionary]) { @($P.Keys) } else { @($P.PropertyNames) }
+    $o = [ordered]@{}
+    foreach ($n in $names) {
+        $k = "$n".ToLower()
+        if ($k -eq 'adspath') { continue }
+        $v = @($P[$n])
+        if ($ldapMulti -contains $k) { $o[$k] = $v } else { $o[$k] = $v[0] }
+    }
+    if ($o.Contains('objectclass')) { $o['objectclass'] = "$(@($o['objectclass'])[-1])" }   # najbardziej szczegółowa klasa
+    if ($o.Contains('objectsid'))   { $o['SID'] = [System.Security.Principal.SecurityIdentifier]::new([byte[]]$o['objectsid'], 0) }
+    if ($o.Contains('sidhistory'))  { $o['sidhistory'] = @($o['sidhistory'] | ForEach-Object { [System.Security.Principal.SecurityIdentifier]::new([byte[]]$_, 0) }) }
+    if ($o.Contains('useraccountcontrol')) {
+        $u = [int]$o['useraccountcontrol']
+        $o['Enabled']               = -not ($u -band 0x2)
+        $o['PasswordNeverExpires']  = [bool]($u -band 0x10000)
+        $o['DoesNotRequirePreAuth'] = [bool]($u -band 0x400000)
+        $o['TrustedForDelegation']  = [bool]($u -band 0x80000)
+        $o['AccountNotDelegated']   = [bool]($u -band 0x100000)
+    }
+    $o['PasswordLastSet'] = $(if ([int64]$o['pwdlastset'] -gt 0) { [datetime]::FromFileTime([int64]$o['pwdlastset']) } else { $null })
+    $o['LastLogonDate']   = $(if ([int64]$o['lastlogontimestamp'] -gt 0) { [datetime]::FromFileTime([int64]$o['lastlogontimestamp']) } else { $null })
+    if ($o.Contains('ntsecuritydescriptor') -and $o['ntsecuritydescriptor'] -is [byte[]]) {
+        $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        $sd.SetSecurityDescriptorBinaryForm([byte[]]$o['ntsecuritydescriptor'])
+        $o['ntsecuritydescriptor'] = $sd
+    }
+    [pscustomobject]$o
+}
+
+# Wyszukiwanie LDAP; zawsze pobiera podstawowe atrybuty kont (DN, nazwy, UAC, SID, daty haseł i logowania)
+function Find-Ldap {
+    param(
+        [string]$Filter = '(objectClass=*)',
+        [string]$SearchBase,
+        [ValidateSet('Base', 'OneLevel', 'Subtree')][string]$Scope = 'Subtree',
+        [string[]]$Properties = @(),
+        [string]$Server = $LdapServer,
+        [switch]$SecurityDescriptor
+    )
+    if (-not $SearchBase) { $SearchBase = $domainDn }
+    $root = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Server/" + ($SearchBase -replace '/', '\/'))
+    $s = New-Object System.DirectoryServices.DirectorySearcher -ArgumentList $root, $Filter
+    $s.SearchScope = [System.DirectoryServices.SearchScope]$Scope
+    if ($Scope -ne 'Base') { $s.PageSize = 1000 }
+    $load = @('distinguishedName', 'name', 'objectClass', 'sAMAccountName', 'userAccountControl', 'objectSid',
+              'pwdLastSet', 'lastLogonTimestamp', 'whenCreated') + $Properties
+    foreach ($p in @($load | Where-Object { $_ } | Sort-Object -Unique)) { [void]$s.PropertiesToLoad.Add($p) }
+    if ($SecurityDescriptor) { $s.SecurityMasks = [System.DirectoryServices.SecurityMasks]'Dacl,Owner,Group' }
+    $res = $null
+    try {
+        $res = $s.FindAll()
+        foreach ($r in $res) { ConvertFrom-LdapResult $r.Properties }
+    } finally {
+        if ($res) { $res.Dispose() }
+        $s.Dispose(); $root.Dispose()
+    }
+}
+
+# Pojedynczy obiekt: po SID (S-1-...), DN (zawiera '=') albo sAMAccountName
+function Get-LdapObject {
+    param(
+        [Parameter(Mandatory)][string]$Identity,
+        [string[]]$Properties = @(),
+        [string]$Server = $LdapServer,
+        [switch]$SecurityDescriptor
+    )
+    $r = if ($Identity -match '^S-1-\d') { Find-Ldap -Filter "(objectSid=$Identity)" -Properties $Properties -Server $Server -SecurityDescriptor:$SecurityDescriptor }
+         elseif ($Identity -notmatch '=') { Find-Ldap -Filter "(sAMAccountName=$(ConvertTo-LdapFilterValue $Identity))" -Properties $Properties -Server $Server -SecurityDescriptor:$SecurityDescriptor }
+         else { Find-Ldap -SearchBase $Identity -Scope Base -Properties $Properties -Server $Server -SecurityDescriptor:$SecurityDescriptor }
+    @($r)[0]
+}
+
+# Użytkownicy w grupie (rekursywnie, LDAP_MATCHING_RULE_IN_CHAIN); bez członkostwa przez primaryGroupID
+function Get-LdapGroupUsers([string]$GroupSid, [string[]]$Properties = @()) {
+    $g = Get-LdapObject -Identity $GroupSid
+    if (-not $g) { throw "nie znaleziono grupy $GroupSid" }
+    Find-Ldap -Properties $Properties -Filter ("(&(objectCategory=person)(objectClass=user)(memberOf:1.2.840.113556.1.4.1941:=" + (ConvertTo-LdapFilterValue $g.distinguishedName) + '))')
+}
+
+# DN właściciela roli FSMO (NTDS Settings) -> nazwa DNS serwera; usunięty DC zostaje jako DN
+function Get-FsmoHost([string]$OwnerDn) {
+    if (-not $OwnerDn) { return $null }
+    if ($OwnerDn -match 'DEL:') { return $OwnerDn }
+    $srv = Get-LdapObject -Identity (($OwnerDn -split '(?<!\\),', 2)[1]) -Properties dNSHostName
+    if ($srv.dnshostname) { $srv.dnshostname } else { $OwnerDn }
+}
+
+$modeName = @{ 0 = 'Windows2000'; 1 = 'Windows2003Interim'; 2 = 'Windows2003'; 3 = 'Windows2008'; 4 = 'Windows2008R2'
+               5 = 'Windows2012'; 6 = 'Windows2012R2'; 7 = 'Windows2016'; 10 = 'Windows2025' }
+$configDn = $rootDse.configurationNamingContext
+
+$dObj = Get-LdapObject -Identity $domainDn -Properties 'msDS-Behavior-Version', fSMORoleOwner, minPwdLength, pwdProperties,
+        maxPwdAge, pwdHistoryLength, lockoutThreshold, 'ms-DS-MachineAccountQuota'
+$xref = @(Find-Ldap -SearchBase "CN=Partitions,$configDn" -Properties nETBIOSName -Filter "(&(objectClass=crossRef)(nCName=$(ConvertTo-LdapFilterValue $domainDn)))")[0]
+$domain = [pscustomobject]@{
+    DNSRoot                    = ConvertFrom-DnToDns $domainDn
+    NetBIOSName                = $xref.netbiosname
+    DistinguishedName          = $domainDn
+    DomainSID                  = $dObj.SID
+    DomainMode                 = "$($modeName[[int]$dObj.'msds-behavior-version'])Domain"
+    PDCEmulator                = Get-FsmoHost $dObj.fsmoroleowner
+    RIDMaster                  = Get-FsmoHost (Get-LdapObject -Identity "CN=RID Manager`$,CN=System,$domainDn" -Properties fSMORoleOwner).fsmoroleowner
+    InfrastructureMaster       = Get-FsmoHost (Get-LdapObject -Identity "CN=Infrastructure,$domainDn" -Properties fSMORoleOwner).fsmoroleowner
+    DomainControllersContainer = "OU=Domain Controllers,$domainDn"
+}
+$part = Get-LdapObject -Identity "CN=Partitions,$configDn" -Properties 'msDS-Behavior-Version', fSMORoleOwner
+$forest = [pscustomobject]@{
+    Name               = ConvertFrom-DnToDns $rootDse.rootDomainNamingContext
+    RootDomain         = ConvertFrom-DnToDns $rootDse.rootDomainNamingContext
+    ForestMode         = "$($modeName[[int]$part.'msds-behavior-version'])Forest"
+    SchemaMaster       = Get-FsmoHost (Get-LdapObject -Identity $rootDse.schemaNamingContext -Properties fSMORoleOwner).fsmoroleowner
+    DomainNamingMaster = Get-FsmoHost $part.fsmoroleowner
+}
+$dSid = $domain.DomainSID.Value
+
+# Kontrolery domeny: konta komputerów z primaryGroupID 516 (DC) / 521 (RODC); lokacja i GC z obiektu serwera w CN=Sites
+function Get-LdapDomainControllers {
+    foreach ($c in @(Find-Ldap -Filter '(&(objectCategory=computer)(|(primaryGroupID=516)(primaryGroupID=521)))' -Properties dNSHostName, operatingSystem, operatingSystemVersion, primaryGroupID, serverReferenceBL)) {
+        $srvDn = @($c.serverreferencebl | Where-Object { $_ -like "*,CN=Sites,$configDn" })[0]
+        $site = if ($srvDn) { (($srvDn -split '(?<!\\),')[2]) -replace '^CN=', '' } else { '' }
+        $gc = $false
+        if ($srvDn) { try { $gc = [bool]([int](Get-LdapObject -Identity "CN=NTDS Settings,$srvDn" -Properties options).options -band 1) } catch { $gc = $false } }
+        $ip = ''
+        try { $ip = "$(@([System.Net.Dns]::GetHostAddresses($c.dnshostname) | Where-Object AddressFamily -eq 'InterNetwork')[0])" } catch { $ip = '' }
+        [pscustomobject]@{
+            Name = $c.name; HostName = $c.dnshostname; OperatingSystem = $c.operatingsystem; OperatingSystemVersion = $c.operatingsystemversion
+            Site = $site; IPv4Address = $ip; IsGlobalCatalog = $gc; IsReadOnly = ([int]$c.primarygroupid -eq 521); ComputerObjectDN = $c.distinguishedname
+        }
+    }
+}
+
+# Polityka haseł domeny (atrybuty obiektu domeny)
+function Get-LdapPasswordPolicy {
+    $age = [int64]$dObj.maxpwdage
+    [pscustomobject]@{
+        MinPasswordLength    = [int]$dObj.minpwdlength
+        ComplexityEnabled    = [bool]([int]$dObj.pwdproperties -band 1)
+        MaxPasswordAge       = $(if ($age -eq 0 -or $age -eq [int64]::MinValue) { [TimeSpan]::Zero } else { [TimeSpan]::FromTicks(-$age) })
+        PasswordHistoryCount = [int]$dObj.pwdhistorylength
+        LockoutThreshold     = [int]$dObj.lockoutthreshold
+    }
+}
+
+# Relacje zaufania (obiekty trustedDomain w CN=System)
+function Get-LdapTrusts {
+    $dir  = @{ 0 = 'Disabled'; 1 = 'Inbound'; 2 = 'Outbound'; 3 = 'BiDirectional' }
+    $type = @{ 1 = 'Downlevel'; 2 = 'Uplevel'; 3 = 'MIT'; 4 = 'DCE' }
+    foreach ($t in @(Find-Ldap -SearchBase "CN=System,$domainDn" -Filter '(objectClass=trustedDomain)' -Properties trustPartner, trustDirection, trustType, trustAttributes, 'msDS-SupportedEncryptionTypes')) {
+        $a = [int]$t.trustattributes
+        [pscustomobject]@{
+            Target = $t.trustpartner; Direction = $dir[[int]$t.trustdirection]; TrustType = $type[[int]$t.trusttype]
+            ForestTransitive = [bool]($a -band 0x8); IntraForest = [bool]($a -band 0x20); SIDFilteringQuarantined = [bool]($a -band 0x4)
+        }
+    }
+}
+
+# Partnerzy replikacji przychodzącej DC (atrybut konstruowany msDS-NCReplInboundNeighbors, XML) - jak Get-ADReplicationPartnerMetadata
+function Get-LdapReplPartners([string]$Dc) {
+    $rde = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Dc/RootDSE")
+    $ncs = @($rde.Properties['namingContexts'] | ForEach-Object { "$_" })
+    $rde.Dispose()
+    foreach ($nc in $ncs) {
+        $o = Get-LdapObject -Identity $nc -Server $Dc -Properties 'msDS-NCReplInboundNeighbors'
+        foreach ($x in @($o.'msds-ncreplinboundneighbors' | Where-Object { $_ })) {
+            $n = ([xml]$x).DS_REPL_NEIGHBOR
+            [pscustomobject]@{
+                Server = $Dc; Partner = $n.pszSourceDsaDN; Partition = $n.pszNamingContext
+                LastReplicationSuccess = ConvertFrom-LdapTime $n.ftimeLastSyncSuccess
+                LastReplicationAttempt = ConvertFrom-LdapTime $n.ftimeLastSyncAttempt
+                LastReplicationResult  = [int]$n.dwLastSyncResult
+                ConsecutiveReplicationFailureCount = [int]$n.cNumConsecutiveSyncFailures
+            }
+        }
+    }
+}
+
+# Metadane replikacji atrybutu (msDS-ReplAttributeMetaData, XML) - data ostatniej zmiany źródłowej
+function Get-LdapAttrChangeTime([string]$Dn, [string]$Attribute) {
+    $o = Get-LdapObject -Identity $Dn -Properties 'msDS-ReplAttributeMetaData'
+    foreach ($x in @($o.'msds-replattributemetadata' | Where-Object { $_ })) {
+        $m = ([xml]$x).DS_REPL_ATTR_META_DATA
+        if ($m.pszAttributeName -eq $Attribute) { return (ConvertFrom-LdapTime $m.ftimeLastOriginatingChange) }
+    }
+    $null
+}
+#endregion
+
 $now      = Get-Date
 $staleDt  = $now.AddDays(-$StaleDays)
-$forest   = Get-ADForest -Server $Server
-$rootDse  = Get-ADRootDSE -Server $Server
-$dSid     = $domain.DomainSID.Value
 $findings = [System.Collections.Generic.List[object]]::new()
 $weights  = @{ Critical = 25; High = 10; Medium = 3; Low = 1; Info = 0 }
 
@@ -549,11 +759,11 @@ function Get-DcGpoSettings {
     }
     $result = @{}
     foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
-        $gpLink = (Get-ADObject -Identity $container -Properties gPLink -Server $Server).gPLink
+        $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink
         if (-not $gpLink) { continue }
         foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
             if ([int]$m.Groups[2].Value -band 1) { continue }
-            $gpo = Get-ADObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags -Server $Server
+            $gpo = Get-LdapObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags
             if ($gpo.flags -band 2) { continue }
             $inf = Join-Path $gpo.gPCFileSysPath 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
             if (-not (Test-Path -LiteralPath $inf)) { continue }
@@ -631,11 +841,11 @@ function Resolve-SidName([string]$Sid) {
 function Get-DcGpoPolicy {
     $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
     foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
-        $gpLink = (Get-ADObject -Identity $container -Properties gPLink -Server $Server).gPLink
+        $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink
         if (-not $gpLink) { continue }
         foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
             if ([int]$m.Groups[2].Value -band 1) { continue }
-            $gpo = Get-ADObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags -Server $Server
+            $gpo = Get-LdapObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags
             if ($gpo.flags -band 2) { continue }
             $src  = "GPO: $($gpo.displayName)"
             $root = Join-Path $gpo.gPCFileSysPath 'Machine'
@@ -718,14 +928,13 @@ function Format-EncTypes($Value) {
 #endregion
 
 #region ---------- dane bazowe i inwentaryzacja ----------
-$dcs = @(Get-ADDomainController -Filter * -Server $Server)
-$pp  = Get-ADDefaultDomainPasswordPolicy -Server $Server
+$dcs = @(Get-LdapDomainControllers)
+$pp  = Get-LdapPasswordPolicy
 $trusts = @()
-try { $trusts = @(Get-ADTrust -Filter * -Server $Server) } catch { }
+try { $trusts = @(Get-LdapTrusts) } catch { $trusts = @() }
 
-$userProps = 'PasswordNeverExpires','PasswordLastSet','LastLogonDate','AccountNotDelegated',
-             'ServicePrincipalName','Enabled','MemberOf','adminCount','DoesNotRequirePreAuth',
-             'SIDHistory','whenCreated','userAccountControl','TrustedForDelegation','msDS-SupportedEncryptionTypes'
+# Atrybuty LDAP kont (UAC, SID, pwdLastSet, lastLogonTimestamp, whenCreated pobiera zawsze Find-Ldap)
+$userProps = 'servicePrincipalName','memberOf','adminCount','sIDHistory','msDS-SupportedEncryptionTypes'
 
 # Grupy uprzywilejowane po SID (nazwy bywają spolszczone)
 $isRoot = $domain.DNSRoot -eq $forest.RootDomain
@@ -746,21 +955,21 @@ $groupMembers = @{}
 $privSids     = @{}
 foreach ($g in $privGroups.GetEnumerator()) {
     try {
-        $m = @(Get-ADGroupMember -Identity $g.Value -Recursive -Server $Server | Where-Object objectClass -eq 'user')
+        $m = @(Get-LdapGroupUsers -GroupSid $g.Value -Properties $userProps)
         $groupMembers[$g.Key] = $m
-        foreach ($u in $m) { $privSids[$u.SID.Value] = $true }
+        foreach ($u in $m) { $privSids[$u.SID.Value] = $u }
     } catch {
         Add-Finding @{ Id = 'ERR-PRIV'; Category = 'Błędy testów'; Severity = 'Info'
                        Title = "Nie odczytano grupy $($g.Key): $($_.Exception.Message)" }
     }
 }
 $privBySid = @{}
-foreach ($sid in $privSids.Keys) { $privBySid[$sid] = Get-ADUser -Identity $sid -Properties $userProps -Server $Server }
+foreach ($sid in $privSids.Keys) { $privBySid[$sid] = $privSids[$sid] }
 $privUsers = @($privBySid.Values)
 function Get-GroupRows([string]$Name) { @($groupMembers[$Name]) | ForEach-Object { ConvertTo-UserRow $privBySid[$_.SID.Value] } }
 
 $protectedUsersDn = $null
-try { $protectedUsersDn = (Get-ADGroup -Identity "$dSid-525" -Server $Server).DistinguishedName } catch { }
+try { $protectedUsersDn = (Get-LdapObject -Identity "$dSid-525").distinguishedname } catch { $protectedUsersDn = $null }
 
 $invPriv = foreach ($gName in $privGroups.Keys) {
     foreach ($m in @($groupMembers[$gName])) {
@@ -847,7 +1056,7 @@ Invoke-Check 'PRIV' {
         Mitre = 'T1078.002'
     }
 
-    $adm = Get-ADUser -Identity "$dSid-500" -Properties PasswordLastSet, LastLogonDate, whenCreated -Server $Server
+    $adm = Get-LdapObject -Identity "$dSid-500"
     if ($adm.PasswordLastSet -and $adm.PasswordLastSet -lt $now.AddDays(-365)) {
         Add-Finding @{
             Id = 'P-ADM500'; Category = $catPriv; Severity = 'Medium'
@@ -860,7 +1069,7 @@ Invoke-Check 'PRIV' {
         }
     }
 
-    $krb = Get-ADUser -Identity krbtgt -Properties PasswordLastSet, whenCreated -Server $Server
+    $krb = Get-LdapObject -Identity krbtgt
     $krbAge = [int]($now - $krb.PasswordLastSet).TotalDays
     if ($krbAge -gt 180) {
         Add-Finding @{
@@ -878,7 +1087,7 @@ Invoke-Check 'PRIV' {
 
 #region ---------- konta użytkowników ----------
 Invoke-Check 'USERS' {
-    $users = @(Get-ADUser -Filter 'Enabled -eq $true' -Properties $userProps -Server $Server)
+    $users = @(Find-Ldap -Properties $userProps -Filter '(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')
 
     Add-IfAny @{
         Id = 'U-ASREP'; Category = $catUser; Severity = 'High'
@@ -975,7 +1184,7 @@ Invoke-Check 'USERS' {
         Mitre = 'T1098'
     }
 
-    $guest = Get-ADUser -Identity "$dSid-501" -Properties LastLogonDate, PasswordLastSet, whenCreated -Server $Server
+    $guest = Get-LdapObject -Identity "$dSid-501"
     if ($guest.Enabled) {
         Add-Finding @{
             Id = 'U-GUEST'; Category = $catUser; Severity = 'High'; Title = 'Konto Gość jest włączone'
@@ -995,14 +1204,14 @@ $lapsSchema = @{}                                                # lDAPDisplayNa
 $lapsOUs    = [System.Collections.Generic.List[string]]::new()   # kontenery z komputerami (nie-DC) - do analizy ACL LAPS
 Invoke-Check 'COMPUTERS' {
     # Atrybuty LAPS obecne w schemacie (legacy: ms-Mcs-*, Windows LAPS: msLAPS-*), z GUID-ami do analizy ACL
-    Get-ADObject -SearchBase $rootDse.schemaNamingContext -Server $Server -Properties lDAPDisplayName, schemaIDGUID -LDAPFilter (
+    Find-Ldap -SearchBase $rootDse.schemaNamingContext -Properties lDAPDisplayName, schemaIDGUID -Filter (
         '(|(lDAPDisplayName=ms-Mcs-AdmPwd)(lDAPDisplayName=ms-Mcs-AdmPwdExpirationTime)(lDAPDisplayName=msLAPS-Password)' +
         '(lDAPDisplayName=msLAPS-EncryptedPassword)(lDAPDisplayName=msLAPS-PasswordExpirationTime))') |
         ForEach-Object { $lapsSchema[$_.lDAPDisplayName] = [guid]::new([byte[]]$_.schemaIDGUID) }
     $lapsAttrs = @('ms-Mcs-AdmPwdExpirationTime', 'msLAPS-PasswordExpirationTime' | Where-Object { $lapsSchema.ContainsKey($_) })
 
-    $props = @('OperatingSystem','OperatingSystemVersion','LastLogonDate','TrustedForDelegation','primaryGroupID','whenCreated') + $lapsAttrs
-    $comps = @(Get-ADComputer -Filter 'Enabled -eq $true' -Properties $props -Server $Server)
+    $props = @('operatingSystem','operatingSystemVersion','primaryGroupID') + $lapsAttrs
+    $comps = @(Find-Ldap -Properties $props -Filter '(&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')
     $nonDc = @($comps | Where-Object { $_.primaryGroupID -notin 516, 521 })
 
     Add-IfAny @{
@@ -1129,7 +1338,7 @@ Invoke-Check 'COMPUTERS' {
         }
     }
 
-    $maq = (Get-ADObject -Identity $domain.DistinguishedName -Properties 'ms-DS-MachineAccountQuota' -Server $Server).'ms-DS-MachineAccountQuota'
+    $maq = $dObj.'ms-ds-machineaccountquota'
     if ($maq -gt 0) {
         Add-Finding @{
             Id = 'C-MAQ'; Category = $catComp; Severity = 'Medium'
@@ -1156,7 +1365,7 @@ Invoke-Check 'LAPS-ACL' {
     $genericAll = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
 
     $aces = foreach ($ou in $lapsOUs) {
-        $sd = (Get-ADObject -Identity $ou -Properties nTSecurityDescriptor -Server $Server).nTSecurityDescriptor
+        $sd = (Get-LdapObject -Identity $ou -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
         foreach ($ace in $sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
             if ("$($ace.AccessControlType)" -ne 'Allow' -or "$($ace.InheritanceType)" -eq 'None') { continue }
             $sid = $ace.IdentityReference.Value
@@ -1208,7 +1417,7 @@ Invoke-Check 'LAPS-ACL' {
         Add-IfAny @{
             Id = 'C-LAPS-READABLE'; Category = $catComp; Severity = 'High'
             Title = "Konto użyte do przeglądu ($($me.Name)) odczytuje hasła LAPS"
-            Objects = (Get-ADComputer -LDAPFilter $flt -Properties OperatingSystem, LastLogonDate, whenCreated -Server $Server | ForEach-Object { ConvertTo-ComputerRow $_ })
+            Objects = (Find-Ldap -Filter "(&(objectCategory=computer)$flt)" -Properties operatingSystem | ForEach-Object { ConvertTo-ComputerRow $_ })
             Description = 'Konto spoza grup uprzywilejowanych, którym uruchomiono przegląd, ma dostęp do jawnych haseł lokalnego administratora tych komputerów. Wartości haseł nie zostały pobrane ani zapisane w raporcie.'
             Recommendation = 'Ustalić, skąd pochodzi dostęp (patrz C-LAPS-READERS / C-LAPS-READ-BROAD) i czy jest uzasadniony dla tego konta.'
             Fix = (Fx 'Find-LapsADExtendedRights -Identity ''<DN OU>''')
@@ -1265,7 +1474,7 @@ Invoke-Check 'KRB-ENC' {
     }
 
     # DES dopuszczony w konfiguracji: bity 0x1/0x2 w msDS-SupportedEncryptionTypes albo komputer z USE_DES_KEY_ONLY (użytkownicy: U-DES)
-    $desObj = @(Get-ADObject -Server $Server -Properties 'msDS-SupportedEncryptionTypes', userAccountControl, sAMAccountName -LDAPFilter (
+    $desObj = @(Find-Ldap -Properties 'msDS-SupportedEncryptionTypes' -Filter (
                 '(|(msDS-SupportedEncryptionTypes:1.2.840.113556.1.4.804:=3)' +
                 '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=2097152)))') |
                 Where-Object { -not ($_.userAccountControl -band 2) })
@@ -1286,11 +1495,11 @@ Invoke-Check 'KRB-ENC' {
     }
 
     # Konta bez kluczy AES: hasło ustawione przed pierwszym DC 2008+ (data utworzenia grupy Read-only Domain Controllers, RID 521)
-    $aesSince = (Get-ADGroup -Identity "$dSid-521" -Properties whenCreated -Server $Server).whenCreated
+    $aesSince = (Get-LdapObject -Identity "$dSid-521").whencreated
     $ft = $aesSince.ToFileTime()
-    $noAes = @(Get-ADUser -Server $Server -Properties PasswordLastSet, LastLogonDate, whenCreated -LDAPFilter (
+    $noAes = @(Find-Ldap -Filter (
                "(&(objectCategory=person)(objectClass=user)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(pwdLastSet>=1)(pwdLastSet<=$ft))"))
-    $krbtgt = Get-ADUser -Identity krbtgt -Properties PasswordLastSet, LastLogonDate, whenCreated -Server $Server
+    $krbtgt = Get-LdapObject -Identity krbtgt
     if ($krbtgt.PasswordLastSet -and $krbtgt.PasswordLastSet -lt $aesSince) { $noAes += $krbtgt }
     Add-IfAny @{
         Id = 'D-KRB-NOAES'; Category = $catKrb
@@ -1305,7 +1514,7 @@ Invoke-Check 'KRB-ENC' {
     }
 
     # Zaufania bez jawnie włączonego AES
-    $trustObjs = @(Get-ADObject -SearchBase "CN=System,$($domain.DistinguishedName)" -LDAPFilter '(objectClass=trustedDomain)' -Properties 'msDS-SupportedEncryptionTypes', trustPartner -Server $Server)
+    $trustObjs = @(Find-Ldap -SearchBase "CN=System,$($domain.DistinguishedName)" -Filter '(objectClass=trustedDomain)' -Properties 'msDS-SupportedEncryptionTypes', trustPartner)
     Add-IfAny @{
         Id = 'D-KRB-TRUST'; Category = $catKrb; Severity = 'Medium'
         Title = 'Relacje zaufania bez włączonego szyfrowania AES'
@@ -1354,8 +1563,8 @@ Invoke-Check 'DOMAIN' {
             Fix = (Fx 'Set-ADDomainMode -Identity {DOMENA} -DomainMode Windows2016Domain', 'Set-ADForestMode -Identity {LAS} -ForestMode Windows2016Forest')
         }
     }
-    $rb = Get-ADOptionalFeature -Filter "Name -eq 'Recycle Bin Feature'" -Server $Server
-    if (-not $rb.EnabledScopes) {
+    $rb = Get-LdapObject -Identity "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties 'msDS-EnabledFeatureBL'
+    if (-not @($rb.'msds-enabledfeaturebl' | Where-Object { $_ }).Count) {
         Add-Finding @{
             Id = 'D-RECYCLE'; Category = $catDom; Severity = 'Medium'; Title = 'Kosz AD nie jest włączony'
             Description = 'Usunięty obiekt (konto, grupa, OU) można odtworzyć tylko z kopii zapasowej DC.'
@@ -1880,7 +2089,7 @@ if (-not $SkipDCChecks) {
 #endregion
 
 #region ---------- kondycja domeny i replikacja ----------
-# Wszystko zwykłym kontem: metadane replikacji przez ADWS, SYSVOL przez SMB, czas przez NTP (w32tm), DNS przez resolver stacji.
+# Wszystko zwykłym kontem: metadane replikacji przez LDAP z każdego DC, SYSVOL przez SMB, czas przez NTP (w32tm), DNS przez resolver stacji.
 $healthUnk = [System.Collections.Generic.List[object]]::new()
 $replErr = @{
     5 = 'odmowa dostępu'; 1256 = 'system zdalny niedostępny'; 1396 = 'błąd logowania (SPN / konto komputera partnera)'
@@ -1891,12 +2100,12 @@ $replErr = @{
 }
 
 Invoke-Check 'REPL' {
-    $tsl = (Get-ADObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$($rootDse.configurationNamingContext)" -Properties tombstoneLifetime -Server $Server).tombstoneLifetime
+    $tsl = (Get-LdapObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties tombstoneLifetime).tombstonelifetime
     if (-not $tsl) { $tsl = 60 }
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($dc in $dcs) {
         try {
-            foreach ($m in @(Get-ADReplicationPartnerMetadata -Target $dc.HostName -Partition * -ErrorAction Stop)) {
+            foreach ($m in @(Get-LdapReplPartners -Dc $dc.HostName)) {
                 $code = [int]$m.LastReplicationResult
                 $rows.Add([pscustomobject]@{
                     DC            = $dc.HostName
@@ -1952,9 +2161,7 @@ Invoke-Check 'REPL' {
 }
 
 Invoke-Check 'BACKUP' {
-    $md = Get-ADReplicationAttributeMetadata -Object $domain.DistinguishedName -Properties dSASignature -Server $Server |
-          Where-Object AttributeName -eq 'dSASignature' | Select-Object -First 1
-    $last = if ($md) { $md.LastOriginatingChangeTime } else { $null }
+    $last = Get-LdapAttrChangeTime -Dn $domain.DistinguishedName -Attribute 'dSASignature'
     if (-not $last -or $last -lt $now.AddDays(-7)) {
         $txt = if ($last) { "ostatnia zarejestrowana: $(Format-Date $last), $([int]($now - $last).TotalDays) dni temu" } else { 'brak śladu kopii' }
         Add-Finding @{
@@ -1973,7 +2180,7 @@ Invoke-Check 'SYSVOL-FRS' {
         Id = 'D-SYSVOL-FRS'; Category = $catHealth; Severity = 'High'
         Title = 'SYSVOL replikowany przez przestarzały FRS'
         Objects = ($dcs | Where-Object {
-                      -not (Get-ADObject -SearchBase $_.ComputerObjectDN -LDAPFilter '(&(objectClass=msDFSR-Subscription)(name=SYSVOL Subscription))' -Server $Server)
+                      -not (Find-Ldap -SearchBase $_.ComputerObjectDN -Filter '(&(objectClass=msDFSR-Subscription)(name=SYSVOL Subscription))')
                   } | ForEach-Object { [pscustomobject]@{ DC = $_.HostName; System = $_.OperatingSystem; Mechanizm = 'FRS (brak subskrypcji DFSR dla SYSVOL)' } })
         Description = 'FRS jest wycofany i zawodny (rozjeżdżające się GPO i skrypty). Nowych DC z Windows Server 2019+ nie da się dodać do domeny z SYSVOL na FRS.'
         Recommendation = 'Przeprowadzić migrację SYSVOL do DFSR (dfsrmig: Prepared, Redirected, Eliminated) przy zdrowej replikacji AD.'
@@ -1992,7 +2199,7 @@ Invoke-Check 'FSMO' {
         Id = 'D-FSMO'; Category = $catHealth; Severity = 'Critical'
         Title = 'Role FSMO przypisane do nieistniejącego kontrolera domeny'
         Objects = @(foreach ($r in $roles.GetEnumerator()) {
-            $owner = (Get-ADObject -Identity $r.Value -Properties fSMORoleOwner -Server $Server).fSMORoleOwner
+            $owner = (Get-LdapObject -Identity $r.Value -Properties fSMORoleOwner).fsmoroleowner
             $srv   = (($owner -split ',')[1]) -replace '^CN=', ''
             $domainRole = $r.Key -in 'PDC Emulator','RID Master','Infrastructure Master'
             if ($owner -match 'DEL:' -or ($domainRole -and $srv -notin $dcNames)) {
@@ -2010,7 +2217,7 @@ Invoke-Check 'DC-MACHINEPWD' {
         Id = 'DC-MACHINEPWD'; Category = $catHealth; Severity = 'Medium'
         Title = 'Kontrolery domeny z hasłem konta komputera starszym niż 45 dni'
         Objects = ($dcs | ForEach-Object {
-            $c = Get-ADComputer -Identity $_.ComputerObjectDN -Properties PasswordLastSet, LastLogonDate -Server $Server
+            $c = Get-LdapObject -Identity $_.ComputerObjectDN
             if ($c.PasswordLastSet -lt $now.AddDays(-45)) {
                 [pscustomobject]@{ DC = $_.HostName; HasloKontaUstawione = Format-Date $c.PasswordLastSet; OstatnieLogowanie = Format-Date $c.LastLogonDate }
             } })
@@ -2084,8 +2291,8 @@ if (-not $SkipDCChecks) {
     }
 
     Invoke-Check 'GPO-SYNC' {
-        $gpos = @(Get-ADObject -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -SearchScope OneLevel `
-                  -LDAPFilter '(objectClass=groupPolicyContainer)' -Properties displayName, versionNumber -Server $Server)
+        $gpos = @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel `
+                  -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, versionNumber)
         $rows = foreach ($dc in $smbDcs) {
             foreach ($g in $gpos) {
                 $ini = "\\$($dc.HostName)\SYSVOL\$($domain.DNSRoot)\Policies\$($g.Name)\GPT.INI"

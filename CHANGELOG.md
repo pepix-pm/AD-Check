@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.15 – 2026-11-06
+
+- **Bez RSAT:** odczyt AD przez LDAP (`System.DirectoryServices`) zamiast modułu ActiveDirectory. Skrypt działa na każdym Windows bez instalacji i bez uprawnień administratora na stacji. Replikacja i kopia AD z atrybutów konstruowanych `msDS-NCReplInboundNeighbors` / `msDS-ReplAttributeMetaData`; członkostwo rekursywne przez LDAP_MATCHING_RULE_IN_CHAIN.
+- Wymagania: zamiast modułu AD sprawdzane połączenie LDAP z domeną (TCP 389).
+
 ## 0.14 – 2026-11-06
 
 - Przycisk „Kopiuj” przy blokach z poleceniami naprawczymi w raporcie HTML (ukryty na wydruku).

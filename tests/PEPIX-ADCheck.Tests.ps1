@@ -4,9 +4,11 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
+
+    $ldapMulti = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl', 'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl')
 
     function New-PolBytes([object[]]$Entries) {
         $u = [System.Text.Encoding]::Unicode
@@ -77,7 +79,7 @@ Describe 'ConvertFrom-AuditText' {
     }
 }
 
-Describe 'Format-EncTypes', 'Get-ScoreClass' {
+Describe 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime' {
     It 'opisuje bity szyfrowania' {
         Format-EncTypes 24 | Should -Be '24 (AES128, AES256)'
         Format-EncTypes 7 | Should -Be '7 (DES-CRC, DES-MD5, RC4)'
@@ -91,6 +93,34 @@ Describe 'Get-ScoreClass' {
         Get-ScoreClass 9 | Should -Be 'r1'
         Get-ScoreClass 10 | Should -Be 'r2'
         Get-ScoreClass 30 | Should -Be 'r3'
+    }
+}
+
+Describe 'Warstwa LDAP' {
+    It 'ConvertFrom-LdapResult mapuje atrybuty jak moduł AD' {
+        $sid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+        $b = New-Object byte[] $sid.BinaryLength; $sid.GetBinaryForm($b, 0)
+        $o = ConvertFrom-LdapResult @{
+            'userAccountControl' = @(66050); 'pwdLastSet' = @([int64]0); 'objectSid' = @(, $b)
+            'servicePrincipalName' = @('HTTP/a', 'HTTP/b'); 'objectClass' = @('top', 'person', 'user'); 'sAMAccountName' = @('jan')
+        }
+        $o.Enabled | Should -BeFalse
+        $o.PasswordNeverExpires | Should -BeTrue
+        $o.PasswordLastSet | Should -BeNullOrEmpty
+        $o.SID.Value | Should -Be 'S-1-5-32-544'
+        @($o.ServicePrincipalName).Count | Should -Be 2
+        $o.ObjectClass | Should -Be 'user'
+        $o.SamAccountName | Should -Be 'jan'
+    }
+    It 'ConvertTo-LdapFilterValue escapuje znaki specjalne' {
+        ConvertTo-LdapFilterValue 'CN=Kowalski\, Jan (IT)*' | Should -Be 'CN=Kowalski\5c, Jan \28IT\29\2a'
+    }
+    It 'ConvertFrom-DnToDns' {
+        ConvertFrom-DnToDns 'OU=Biuro,DC=firma,DC=local' | Should -Be 'firma.local'
+    }
+    It 'ConvertFrom-LdapTime: zerowa data to brak' {
+        ConvertFrom-LdapTime '1601-01-01T00:00:00Z' | Should -BeNullOrEmpty
+        ConvertFrom-LdapTime '2026-01-02T03:04:05Z' | Should -Not -BeNullOrEmpty
     }
 }
 
