@@ -423,7 +423,8 @@ $planMeta = @{
     'D-BACKUP'         = @(4, 8, 1, 'Z testem odtworzenia')
     'D-RECYCLE'        = @(0.5, 1, 1, '')
 }
-$planStages = [ordered]@{
+# Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
+$planStages = @{
     1 = 'Etap 1 - do 30 dni: działania szybkie i problemy krytyczne'
     2 = 'Etap 2 - 30-90 dni: zmiany wymagające testów i uzgodnień'
     3 = 'Etap 3 - do 12 miesięcy: projekty (migracje, modernizacja)'
@@ -2218,7 +2219,7 @@ $planRows = @(foreach ($f in $real) {
     }
 } | Sort-Object Etap, { $sevOrder[$_.Waga] }, Id)
 $planSum = @{}
-foreach ($k in $planStages.Keys) {
+foreach ($k in 1..3) {
     $g = @($planRows | Where-Object Etap -eq $k)
     $planSum[$k] = @([double](($g | ForEach-Object { $_.GodzinyMin } | Measure-Object -Sum).Sum), [double](($g | ForEach-Object { $_.GodzinyMax } | Measure-Object -Sum).Sum), $g.Count)
 }
@@ -2461,7 +2462,7 @@ $totMin = ($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum
 $totMax = ($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum
 [void]$sb.Append("<p>Szacowana łączna pracochłonność: <b>$(Format-Hours $totMin)-$(Format-Hours $totMax) h</b>.</p>")
 [void]$sb.Append('<p class="note">Szacunki są orientacyjne: obejmują przygotowanie, wdrożenie i weryfikację zmian w typowej domenie, bez zakupów, licencji i migracji pojedynczych stacji. Każda zmiana wymaga zgłoszenia i akceptacji przed wykonaniem. Znaleziska krytyczne są zawsze w etapie 1.</p>')
-foreach ($k in $planStages.Keys) {
+foreach ($k in 1..3) {
     $g = @($planRows | Where-Object Etap -eq $k)
     if (-not $g.Count) { continue }
     [void]$sb.Append("<div class=`"lbl`">$(HtmlEnc $planStages[$k]) &nbsp;<span class=`"note`">($($g.Count) zadań, $(Format-Hours $planSum[$k][0])-$(Format-Hours $planSum[$k][1]) h)</span></div>")
