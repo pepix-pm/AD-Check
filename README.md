@@ -131,9 +131,11 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | U-STALE | Low | Nieużywane aktywne konta | T1078.002 |
 | U-ADMINCOUNT | Low | Osierocone adminCount=1 | T1098 |
 | C-UNCONSTR | Critical | Komputery (nie-DC) z delegacją nieograniczoną | T1558 |
-| C-OS-EOL | High | Systemy bez wsparcia | T1210 |
+| C-OS-EOL | High | Systemy bez wsparcia (Windows 7/8.1, Server ≤ 2012 R2, wycofane LTSC/SAC) | T1210 |
 | C-LAPS-NONE | High | Brak LAPS w schemacie | T1550.002 |
-| C-OS-W10 | Medium | Windows 10 | T1210 |
+| C-OS-W10 | Medium | Windows 10 (poza LTSC) | T1210 |
+| C-OS-FEATURE | Medium | Windows 11 w wersji bez wsparcia (np. 23H2 Pro) | T1210 |
+| C-OS-SOON | Medium | Serwery/LTSC z końcem wsparcia w ciągu 12 miesięcy | T1210 |
 | C-LAPS-MISSING | Medium | Komputery bez hasła LAPS | T1550.002 |
 | C-MAQ | Medium | MachineAccountQuota > 0 | T1136.002 |
 | C-STALE | Low | Nieużywane konta komputerów | T1078.002 |
@@ -149,6 +151,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-LDAPSIGN | Medium | Podpisywanie LDAP niewymagane | T1557 |
 | DC-LDAPCBT | Medium | LDAP channel binding niewymuszony | T1557 |
 | DC-NTLMV1 | Medium | DC akceptuje NTLMv1/LM | T1557.001 |
+
+## Wersje systemów
+
+Wersja i data końca wsparcia ustalane są z atrybutów `operatingSystem` i `operatingSystemVersion` kont komputerów w AD – bez łączenia się z komputerami. Tabela dat (`$win11Builds`, `$win10Ltsc`, `$serverEol`, `$legacyClient`, `$osLifecycleAsOf`) jest w skrypcie i **wymaga aktualizacji przy nowych wersjach Windows**; nieznane wersje nie są oceniane. Pełny rozkład systemów jest w załączniku A raportu.
 
 ## Ograniczenia
 

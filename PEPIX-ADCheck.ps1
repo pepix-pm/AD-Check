@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.4)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.5)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -32,7 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.4'
+$Version = '0.5'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -120,6 +120,82 @@ function ConvertTo-ComputerRow($c) {
         Utworzone         = Format-Date $c.whenCreated
         Kontener          = Get-ParentOU $c.DistinguishedName
     }
+}
+
+# ---------- cykl życia Windows (Microsoft Lifecycle) ----------
+# AKTUALIZOWAĆ przy nowych wersjach Windows; data stanu trafia do raportu.
+# Windows 11: Enterprise/Education/IoT Enterprise mają 36 mies. wsparcia wersji, Home/Pro/Pro Education 24 mies.
+$osLifecycleAsOf = '2026-11'
+$win11Builds = @{
+    22000 = @{ Nazwa = '21H2'; Ent = '2024-10-08'; Pro = '2023-10-10' }
+    22621 = @{ Nazwa = '22H2'; Ent = '2025-10-14'; Pro = '2024-10-08' }
+    22631 = @{ Nazwa = '23H2'; Ent = '2026-11-10'; Pro = '2025-11-11' }
+    26100 = @{ Nazwa = '24H2'; Ent = '2027-10-12'; Pro = '2026-10-13' }
+    26200 = @{ Nazwa = '25H2'; Ent = '2028-10-10'; Pro = '2027-10-12' }
+}
+$win10Ltsc = @{
+    10240 = @{ Nazwa = 'LTSB 2015'; Koniec = '2025-10-14' }
+    14393 = @{ Nazwa = 'LTSB 2016'; Koniec = '2026-10-13' }
+    17763 = @{ Nazwa = 'LTSC 2019'; Koniec = '2029-01-09' }
+    19044 = @{ Nazwa = 'LTSC 2021'; Koniec = '2027-01-12'; IoT = '2032-01-13' }
+}
+$serverEol = [ordered]@{ '2025' = '2034-11-14'; '2022' = '2031-10-14'; '2019' = '2029-01-09'; '2016' = '2027-01-12'
+                         '2012' = '2023-10-10'; '2008' = '2020-01-14'; '2003' = '2015-07-14' }
+$legacyClient = [ordered]@{ 'Windows 8.1' = '2023-01-10'; 'Windows 8' = '2016-01-12'; 'Windows 7' = '2020-01-14'
+                            'Vista' = '2017-04-11'; 'Windows XP' = '2014-04-08'; 'Windows 2000' = '2010-07-13'; 'Windows NT' = '2004-12-31' }
+
+# Wersja i data końca wsparcia na podstawie atrybutów operatingSystem i operatingSystemVersion ("10.0 (22631)").
+# Typ: Legacy | Serwer | LTSC | W10 | W11 | Inne (system spoza Windows lub nierozpoznany - bez oceny).
+function Get-OsLifecycle([string]$Os, [string]$Ver) {
+    $build = 0
+    if ($Ver -match '\((\d+)\)') { $build = [int]$Matches[1] }
+    $r = [pscustomobject]@{ Typ = 'Inne'; Wersja = ''; Koniec = $null }
+    if ($Os -notmatch 'Windows') { return $r }
+
+    foreach ($k in $legacyClient.Keys) {
+        if ($Os -match [regex]::Escape($k)) { $r.Typ = 'Legacy'; $r.Wersja = $k; $r.Koniec = [datetime]$legacyClient[$k]; return $r }
+    }
+    if ($Os -match 'Windows Server') {
+        $r.Typ = 'Serwer'
+        foreach ($y in $serverEol.Keys) {
+            if ($Os -match "Server $y") { $r.Wersja = $(if ($Os -match "$y R2") { "$y R2" } else { $y }); $r.Koniec = [datetime]$serverEol[$y]; return $r }
+        }
+        # Bez roku w nazwie i build < 20348 = kanał półroczny (SAC 1709-20H2), wszystkie bez wsparcia
+        if ($build -gt 0 -and $build -lt 20348) { $r.Wersja = "SAC (build $build)"; $r.Koniec = [datetime]'2022-08-09' }
+        return $r
+    }
+    if ($Os -match 'Windows 10') {
+        if ($Os -match 'LTS[BC]' -and $win10Ltsc.ContainsKey($build)) {
+            $l = $win10Ltsc[$build]
+            $r.Typ = 'LTSC'; $r.Wersja = $l.Nazwa
+            $r.Koniec = [datetime]$(if ($Os -match 'IoT' -and $l.IoT) { $l.IoT } else { $l.Koniec })
+            return $r
+        }
+        $r.Typ = 'W10'; $r.Wersja = $(if ($build -eq 19045) { '22H2' } else { "build $build" }); $r.Koniec = [datetime]'2025-10-14'
+        return $r
+    }
+    if ($Os -match 'Windows 11') {
+        if ($Os -match 'LTSC') {
+            $r.Typ = 'LTSC'; $r.Wersja = 'LTSC 2024'; $r.Koniec = [datetime]$(if ($Os -match 'IoT') { '2034-10-10' } else { '2029-10-09' })
+            return $r
+        }
+        $r.Typ = 'W11'
+        if ($win11Builds.ContainsKey($build)) {
+            $b   = $win11Builds[$build]
+            $ent = $Os -match 'Enterprise|Education' -and $Os -notmatch 'Pro Education'
+            $r.Wersja = $b.Nazwa
+            $r.Koniec = [datetime]$(if ($ent) { $b.Ent } else { $b.Pro })
+        } else { $r.Wersja = "build $build" }   # nowsza wersja, której nie ma jeszcze w tabeli - bez oceny
+        return $r
+    }
+    $r
+}
+
+# Wiersz komputera z wersją systemu i datą końca wsparcia; wejście: obiekt z polami C (komputer) i L (Get-OsLifecycle)
+function ConvertTo-OsRow($x) {
+    ConvertTo-ComputerRow $x.C |
+        Add-Member -NotePropertyName Wersja -NotePropertyValue $x.L.Wersja -PassThru |
+        Add-Member -NotePropertyName KoniecWsparcia -NotePropertyValue (Format-Date $x.L.Koniec) -PassThru
 }
 
 function Add-Finding([hashtable]$F) {
@@ -502,12 +578,13 @@ Invoke-Check 'USERS' {
 #endregion
 
 #region ---------- komputery i LAPS ----------
+$invOs = [System.Collections.Generic.List[object]]::new()   # wypełniana w teście COMPUTERS
 Invoke-Check 'COMPUTERS' {
     $lapsAttrs = @((Get-ADObject -SearchBase $rootDse.schemaNamingContext -Server $Server `
         -LDAPFilter '(|(lDAPDisplayName=ms-Mcs-AdmPwdExpirationTime)(lDAPDisplayName=msLAPS-PasswordExpirationTime))' `
         -Properties lDAPDisplayName).lDAPDisplayName)
 
-    $props = @('OperatingSystem','LastLogonDate','TrustedForDelegation','primaryGroupID','whenCreated') + $lapsAttrs
+    $props = @('OperatingSystem','OperatingSystemVersion','LastLogonDate','TrustedForDelegation','primaryGroupID','whenCreated') + $lapsAttrs
     $comps = @(Get-ADComputer -Filter 'Enabled -eq $true' -Properties $props -Server $Server)
     $nonDc = @($comps | Where-Object { $_.primaryGroupID -notin 516, 521 })
 
@@ -520,23 +597,56 @@ Invoke-Check 'COMPUTERS' {
         Fix = (Fx 'Set-ADAccountControl -Identity ''<komputer>$'' -TrustedForDelegation $false')
         Mitre = 'T1558'
     }
+    $osRows = @($comps | ForEach-Object { [pscustomobject]@{ C = $_; L = (Get-OsLifecycle $_.OperatingSystem $_.OperatingSystemVersion) } })
+    $soon   = $now.AddDays(365)
+
+    $osRows | Group-Object { "$($_.C.OperatingSystem)|$($_.L.Wersja)" } | Sort-Object Count -Descending | ForEach-Object {
+        $f = $_.Group[0]
+        $invOs.Add([pscustomobject]@{
+            System          = $(if ($f.C.OperatingSystem) { $f.C.OperatingSystem } else { '(brak danych)' })
+            Wersja          = $f.L.Wersja
+            Komputery       = $_.Count
+            AktywneOstatnio = @($_.Group | Where-Object { $_.C.LastLogonDate -ge $staleDt }).Count
+            KoniecWsparcia  = Format-Date $f.L.Koniec
+        })
+    }
+
     Add-IfAny @{
         Id = 'C-OS-EOL'; Category = $catComp; Severity = 'High'
-        Title = 'Aktywne komputery z systemem bez wsparcia'
-        Objects = ($comps | Where-Object { $_.OperatingSystem -match 'XP|Vista|Windows 7|Windows 8|2000|2003|2008|2012' } |
-                   ForEach-Object { ConvertTo-ComputerRow $_ })
-        Description = 'Systemy bez poprawek bezpieczeństwa; znane podatności pozostają otwarte na stałe.'
-        Recommendation = 'Zaplanować wymianę lub aktualizację; do tego czasu izolacja sieciowa i ograniczenie logowania kont uprzywilejowanych.'
+        Title = 'Aktywne konta komputerów z systemem bez wsparcia'
+        Objects = ($osRows | Where-Object { $_.L.Typ -in 'Legacy','Serwer','LTSC' -and $_.L.Koniec -and $_.L.Koniec -lt $now } |
+                   Sort-Object { $_.L.Koniec } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = 'Systemy, dla których Microsoft nie wydaje już poprawek bezpieczeństwa (Windows 7/8.1, Server 2012 R2 i starsze, wycofane wersje LTSC i kanału półrocznego). Znane podatności pozostają otwarte na stałe. Kolumna OstatnieLogowanie odróżnia komputery używane od zapomnianych kont (patrz też C-STALE).'
+        Recommendation = 'Zaplanować migrację lub wymianę; do tego czasu izolacja sieciowa (osobny VLAN, tylko niezbędne porty), brak logowania kont uprzywilejowanych, ewentualnie płatne ESU, jeśli dostępne. Nieużywane konta wyłączyć.'
         Fix = (Fx '# brak poprawki skryptem - migracja systemu / wymiana sprzętu')
         Mitre = 'T1210'
     }
     Add-IfAny @{
         Id = 'C-OS-W10'; Category = $catComp; Severity = 'Medium'
-        Title = 'Komputery z Windows 10 (koniec wsparcia: październik 2025)'
-        Objects = ($comps | Where-Object { $_.OperatingSystem -match 'Windows 10' } | ForEach-Object { ConvertTo-ComputerRow $_ })
-        Description = 'Windows 10 nie otrzymuje poprawek bez płatnej subskrypcji ESU.'
-        Recommendation = 'Migracja do Windows 11 lub potwierdzona subskrypcja ESU; zweryfikować zgodność sprzętu.'
-        Fix = (Fx '# brak poprawki skryptem - migracja do Windows 11')
+        Title = 'Komputery z Windows 10 (koniec wsparcia: 14.10.2025)'
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W10' } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = 'Windows 10 (poza wersjami LTSC) nie otrzymuje poprawek bez płatnej subskrypcji Extended Security Updates (ESU) - tylko dla wersji 22H2.'
+        Recommendation = 'Migracja do Windows 11 lub potwierdzona subskrypcja ESU; zweryfikować zgodność sprzętu (TPM 2.0, procesor). Komputery w wersji starszej niż 22H2 nie mogą otrzymać ESU.'
+        Fix = (Fx '# brak poprawki skryptem - migracja do Windows 11 lub ESU (tylko 22H2)')
+        Mitre = 'T1210'
+    }
+    Add-IfAny @{
+        Id = 'C-OS-FEATURE'; Category = $catComp; Severity = 'Medium'
+        Title = 'Komputery z Windows 11 w wersji bez wsparcia'
+        Objects = ($osRows | Where-Object { $_.L.Typ -eq 'W11' -and $_.L.Koniec -and $_.L.Koniec -lt $now } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = 'Każda wersja Windows 11 (np. 23H2) otrzymuje poprawki przez 24 miesiące (Home/Pro) lub 36 miesięcy (Enterprise/Education). Te komputery nie dostały aktualizacji funkcji i nie otrzymują już poprawek bezpieczeństwa.'
+        Recommendation = 'Zainstalować bieżącą aktualizację funkcji (Windows Update / WSUS / Intune). Sprawdzić, czy GPO TargetReleaseVersion lub zatwierdzenia w WSUS nie blokują aktualizacji, oraz czy komputery mają miejsce na dysku.'
+        Fix = (Fx 'gpresult /h gp.html   # na komputerze: Windows Update > TargetReleaseVersion', 'reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate /v TargetReleaseVersionInfo')
+        Mitre = 'T1210'
+    }
+    Add-IfAny @{
+        Id = 'C-OS-SOON'; Category = $catComp; Severity = 'Medium'
+        Title = 'Serwery i systemy LTSC z końcem wsparcia w ciągu 12 miesięcy'
+        Objects = ($osRows | Where-Object { $_.L.Typ -in 'Serwer','LTSC' -and $_.L.Koniec -and $_.L.Koniec -ge $now -and $_.L.Koniec -lt $soon } |
+                   Sort-Object { $_.L.Koniec } | ForEach-Object { ConvertTo-OsRow $_ })
+        Description = 'Po dacie z kolumny KoniecWsparcia systemy przestaną otrzymywać poprawki bezpieczeństwa. Migracja serwerów (zwłaszcza DC, aplikacji, SQL) wymaga planowania z wyprzedzeniem.'
+        Recommendation = 'Ująć migrację w planie i budżecie; dla każdego serwera ustalić docelowy system, właściciela i termin.'
+        Fix = (Fx '# brak poprawki skryptem - plan migracji (np. Windows Server 2016 -> 2022/2025)')
         Mitre = 'T1210'
     }
     Add-IfAny @{
@@ -653,8 +763,9 @@ Invoke-Check 'DC-OS' {
     Add-IfAny @{
         Id = 'DC-OS-EOL'; Category = $catDC; Severity = 'High'
         Title = 'Kontrolery domeny z systemem bez wsparcia'
-        Objects = ($dcs | Where-Object { $_.OperatingSystem -match '2003|2008|2012' } |
-                   ForEach-Object { [pscustomobject]@{ DC = $_.HostName; System = $_.OperatingSystem; Lokacja = $_.Site } })
+        Objects = ($dcs | ForEach-Object { $l = Get-OsLifecycle $_.OperatingSystem $_.OperatingSystemVersion
+                       if ($l.Koniec -and $l.Koniec -lt $now) {
+                           [pscustomobject]@{ DC = $_.HostName; System = $_.OperatingSystem; KoniecWsparcia = Format-Date $l.Koniec; Lokacja = $_.Site } } })
         Description = 'Kontroler domeny bez poprawek to najcenniejszy cel w sieci.'
         Recommendation = 'Promować nowy DC (Windows Server 2022/2025), przenieść role FSMO, zdegradować stary.'
         Fix = (Fx 'Install-ADDSDomainController -DomainName {DOMENA}   # na nowym serwerze', 'Move-ADDirectoryServerOperationMasterRole -Identity <nowy_DC> -OperationMasterRole 0,1,2,3,4')
@@ -844,7 +955,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
 [ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted
-            Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts } } |
+            Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
 $sorted | Select-Object Id, Category, Severity, Title, Count, Recommendation, Mitre |
@@ -982,11 +1093,13 @@ foreach ($f in $sorted) {
 [void]$sb.Append('<div class="lbl">Kontrolery domeny</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invDCs))
 [void]$sb.Append('<div class="lbl">Członkowie grup uprzywilejowanych (rekursywnie)</div>'); [void]$sb.Append((ConvertTo-HtmlTable @($invPriv)))
 [void]$sb.Append('<div class="lbl">Relacje zaufania</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invTrusts))
+[void]$sb.Append("<div class=`"lbl`">Systemy operacyjne (aktywne konta komputerów; AktywneOstatnio = logowanie w ciągu $StaleDays dni)</div>"); [void]$sb.Append((ConvertTo-HtmlTable @($invOs)))
 [void]$sb.Append('</section>')
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
 [void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, analizy uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS) ani stacji końcowych. ')
+[void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe i wymagają weryfikacji oraz zgłoszenia zmiany przed wykonaniem.')
 [void]$sb.Append('</p></section></div>')
