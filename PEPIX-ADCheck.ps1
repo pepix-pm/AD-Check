@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.17'
+$Version = '0.18'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -515,6 +515,14 @@ $ruleCatalog = @(
     @{ Id = 'P-PROTECTED';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane spoza Protected Users' }
     @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
     @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
+    @{ Id = 'D-DSHEURISTICS';    O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'dSHeuristics osłabia zabezpieczenia' }
+    @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DOMAIN';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
+    @{ Id = 'DC-ANONLDAP';       O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Anonimowe zapytania LDAP do DC' }
+    @{ Id = 'DC-NETSESSION';     O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Wyliczanie sesji SMB na DC (NetCease)' }
+    @{ Id = 'D-GPO-LLMNR';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'LLMNR niewyłączony w GPO' }
+    @{ Id = 'D-GPO-HARDPATH';    O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'Hardened UNC Paths dla SYSVOL/NETLOGON' }
+    @{ Id = 'D-GPO-PSLOG';       O = 'A'; M = 'Audyt';                        C = 'GPO-ALL';      W = 'DC'; T = 'Rejestrowanie bloków skryptów PowerShell' }
+    @{ Id = 'P-ADMINMAIL';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane z adresem e-mail' }
 )
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
@@ -660,6 +668,14 @@ $planMeta = @{
     'P-PROTECTED'      = @(2, 6, 2, 'Etapami, najpierw konto testowe')
     'C-OWNER'          = @(1, 4, 2, 'Zmiana właściciela skryptem; razem z C-MAQ')
     'D-PREWIN2000'     = @(1, 3, 2, 'Test zgodności starszych systemów i urządzeń')
+    'D-DSHEURISTICS'   = @(1, 2, 2, 'Ustalić przyczynę zmiany przed przywróceniem')
+    'D-DNS-CREATECHILD' = @(1, 3, 2, 'Rekord wildcard w każdej strefie; uzgodnić adres docelowy')
+    'DC-ANONLDAP'      = @(1, 4, 1, 'Najpierw ustalić urządzenia korzystające z anonimowego LDAP')
+    'DC-NETSESSION'    = @(1, 3, 2, 'Restart usługi Server w oknie serwisowym')
+    'D-GPO-LLMNR'      = @(1, 2, 1, 'Razem z wyłączeniem NetBIOS przez DHCP')
+    'D-GPO-HARDPATH'   = @(0.5, 2, 1, '')
+    'D-GPO-PSLOG'      = @(1, 4, 2, 'Rozmiar dziennika i przekazywanie do SIEM')
+    'P-ADMINMAIL'      = @(1, 3, 2, 'Wymaga osobnych kont dla administratorów')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
 $planStages = @{
@@ -927,6 +943,48 @@ function Get-DcGpoPolicy {
     $pol
 }
 
+# Wszystkie GPO z włączonym łączem (domena, OU, lokacje) -> wpisy rejestru komputera z Registry.pol i preferencji (Registry.xml).
+# Bez kolejności, filtrów zabezpieczeń i WMI: odpowiada na pytanie "czy któreś GPO ustawia X", a nie "co dostaje dany komputer".
+function Get-LinkedGpoRegistry {
+    $links = @{}
+    $holders = @(Find-Ldap -Filter '(gPLink=*)' -Properties gPLink) + @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Filter '(gPLink=*)' -Properties gPLink)
+    foreach ($h in $holders) {
+        foreach ($m in [regex]::Matches("$($h.gplink)", '\[LDAP://([^;\]]+);(\d+)\]')) {
+            if (-not ([int]$m.Groups[2].Value -band 1)) { $links[$m.Groups[1].Value.ToLower()] = $true }
+        }
+    }
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($dn in $links.Keys) {
+        $gpo = $null
+        try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags } catch { $gpo = $null }
+        if (-not $gpo -or ([int]$gpo.flags -band 2) -or -not $gpo.gpcfilesyspath) { continue }
+        $root = Join-Path $gpo.gpcfilesyspath 'Machine'
+        $polFile = Join-Path $root 'Registry.pol'
+        if (Test-Path -LiteralPath $polFile) {
+            foreach ($e in @(Read-RegistryPol ([System.IO.File]::ReadAllBytes($polFile)))) {
+                $out.Add([pscustomobject]@{ Gpo = $gpo.displayname; Key = $e.Key; Name = $e.Name; Data = $e.Data; Deleted = $e.Deleted })
+            }
+        }
+        $xmlFile = Join-Path $root 'Preferences\Registry\Registry.xml'
+        if (Test-Path -LiteralPath $xmlFile) {
+            $x = $null
+            try { $x = [xml](Get-Content -LiteralPath $xmlFile -Raw) } catch { $x = $null }
+            foreach ($p in @($x.SelectNodes('//Properties') | Where-Object { $_ })) {
+                if ($p.hive -ne 'HKEY_LOCAL_MACHINE' -or $p.action -eq 'D') { continue }
+                $d = $p.value
+                if ($p.type -eq 'REG_DWORD') { try { $d = [Convert]::ToInt64($p.value, 16) } catch { $d = $p.value } }
+                $out.Add([pscustomobject]@{ Gpo = "$($gpo.displayname) (preferencje)"; Key = $p.key; Name = $p.name; Data = $d; Deleted = $false })
+            }
+        }
+    }
+    $out
+}
+
+# Znaki dSHeuristics (numeracja od 1, jak w dokumentacji MS-ADTS); brak znaku = wartość domyślna '0'
+function Get-DsHeuristicsChar([string]$Value, [int]$Position) {
+    if ($Value.Length -ge $Position) { "$($Value[$Position - 1])" } else { '0' }
+}
+
 # Ocena wartości kontroli CIS; $null = nieustawione -> wartość domyślna systemu (D), brak domyślnej = niezgodne
 function Test-CisValue($Value, [hashtable]$Control) {
     $v = $Value
@@ -974,7 +1032,7 @@ $trusts = @()
 try { $trusts = @(Get-LdapTrusts) } catch { $trusts = @() }
 
 # Atrybuty LDAP kont (UAC, SID, pwdLastSet, lastLogonTimestamp, whenCreated pobiera zawsze Find-Ldap)
-$userProps = 'servicePrincipalName','memberOf','adminCount','sIDHistory','msDS-SupportedEncryptionTypes'
+$userProps = 'servicePrincipalName','memberOf','adminCount','sIDHistory','msDS-SupportedEncryptionTypes','mail'
 
 # Grupy uprzywilejowane po SID (nazwy bywają spolszczone)
 $isRoot = $domain.DNSRoot -eq $forest.RootDomain
@@ -1119,6 +1177,16 @@ Invoke-Check 'PRIV' {
             Fix = (Fx 'Get-WinEvent -ComputerName <DC> -LogName Security -FilterXPath "*[System[EventID=4768] and EventData[Data[@Name=''TargetSid'']=''{SID}-500'']]" -MaxEvents 50 | Format-List TimeCreated, Message')
             Mitre = 'T1078.002'
         }
+    }
+
+    Add-IfAny @{
+        Id = 'P-ADMINMAIL'; Category = $catPriv; Severity = 'Low'
+        Title = 'Konta uprzywilejowane z adresem e-mail'
+        Objects = ($en | Where-Object { $_.mail } | ForEach-Object { ConvertTo-UserRow $_ | Add-Member -NotePropertyName Email -NotePropertyValue $_.mail -PassThru })
+        Description = 'Adres e-mail na koncie administracyjnym zwykle oznacza, że administrator czyta pocztę z tego konta. Złośliwy załącznik lub link otwarty w takiej sesji działa wtedy z uprawnieniami administratora domeny; konto jest też widoczne w książce adresowej i narażone na phishing.'
+        Recommendation = 'Rozdzielić konta: imienne konto zwykłe (poczta, internet) i osobne konto administracyjne bez skrzynki i bez adresu e-mail.'
+        Fix = (Fx 'Set-ADUser -Identity <konto_admin> -Clear mail')
+        Mitre = 'T1566'
     }
 
     # Protected Users (RID 525) rekursywnie; grupa istnieje, gdy w domenie był PDC z Windows Server 2012 R2+
@@ -1711,6 +1779,55 @@ Invoke-Check 'DOMAIN' {
             Mitre = 'T1087.002'
         }
     }
+
+    # dSHeuristics: 7 = operacje anonimowe LDAP, 28/29 = poprawki CVE-2021-42291 (KB5008383); '1' w 28/29 wyłącza ochronę
+    $dsh = "$((Get-LdapObject -Identity "CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties dSHeuristics).dsheuristics)"
+    $dshRows = @(
+        if ((Get-DsHeuristicsChar $dsh 7) -eq '2') { [pscustomobject]@{ Znak = 7; Nazwa = 'fLDAPBlockAnonOps'; Wartosc = '2'; Skutek = 'anonimowe operacje LDAP dozwolone'; S = 'High' } }
+        if ((Get-DsHeuristicsChar $dsh 28) -eq '1') { [pscustomobject]@{ Znak = 28; Nazwa = 'AttributeAuthorizationOnLDAPAdd'; Wartosc = '1'; Skutek = 'wyłączona dodatkowa kontrola atrybutów przy tworzeniu obiektów (CVE-2021-42291)'; S = 'Medium' } }
+        if ((Get-DsHeuristicsChar $dsh 29) -eq '1') { [pscustomobject]@{ Znak = 29; Nazwa = 'BlockOwnerImplicitRights'; Wartosc = '1'; Skutek = 'wyłączona blokada niejawnych praw właściciela (CVE-2021-42291)'; S = 'Medium' } }
+    )
+    if ($dshRows.Count) {
+        Add-Finding @{
+            Id = 'D-DSHEURISTICS'; Category = $catDom; Severity = $(if ($dshRows.S -contains 'High') { 'High' } else { 'Medium' })
+            Title = "dSHeuristics osłabia zabezpieczenia lasu (wartość: $dsh)"
+            Objects = ($dshRows | Select-Object Znak, Nazwa, Wartosc, Skutek)
+            Description = 'Atrybut dSHeuristics zmienia zachowanie AD w całym lesie. Siódmy znak "2" pozwala na anonimowe zapytania LDAP (wyliczanie kont bez logowania, o ile pozwalają na to uprawnienia). Znaki 28 i 29 ustawione na "1" wyłączają poprawki CVE-2021-42291, które utrudniają przejęcie domeny przez konta komputerów tworzone przez zwykłych użytkowników.'
+            Recommendation = 'Przywrócić znaki do "0" (wartość domyślna). Wcześniej ustalić, kto i po co je zmienił (np. stara aplikacja wymagająca anonimowego LDAP).'
+            Fix = (Fx '$ds = [ADSI]"LDAP://CN=Directory Service,CN=Windows NT,CN=Services,$(([ADSI]''LDAP://RootDSE'').configurationNamingContext)"',
+                      '$ds.dSHeuristics   # bieżąca wartość; zmiana przez ADSI Edit po uzgodnieniu z klientem')
+            Mitre = 'T1087.002'
+        }
+    }
+
+    # Strefy DNS w AD: CreateChild dla Authenticated Users/Everyone (domyślne - potrzebne do dynamicznej rejestracji) bez rekordu wildcard
+    $wideDns = @{ 'S-1-5-11' = 'Authenticated Users'; 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon' }
+    $dnsRows = foreach ($base in @("CN=MicrosoftDNS,DC=DomainDnsZones,$domainDn", "CN=MicrosoftDNS,DC=ForestDnsZones,$($rootDse.rootDomainNamingContext)", "CN=MicrosoftDNS,CN=System,$domainDn")) {
+        $zones = @()
+        try { $zones = @(Find-Ldap -SearchBase $base -Scope OneLevel -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) } catch { $zones = @() }
+        foreach ($z in $zones) {
+            if ($z.name -in 'RootDNSServers', '..TrustAnchors' -or $z.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+            $who = @($z.ntsecuritydescriptor.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+                     Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::CreateChild) -and $wideDns.ContainsKey($_.IdentityReference.Value) } |
+                     ForEach-Object { $wideDns[$_.IdentityReference.Value] } | Sort-Object -Unique)
+            if (-not $who.Count) { continue }
+            $wild = @()
+            try { $wild = @(Find-Ldap -SearchBase $z.distinguishedname -Scope OneLevel -Filter '(name=\2a)') } catch { $wild = @() }
+            if (-not $wild.Count) {
+                [pscustomobject]@{ Strefa = $z.name; Partycja = (($base -split ',', 2)[1]); Uprawnieni = ($who -join ', '); RekordWildcard = 'brak' }
+            }
+        }
+    }
+    Add-IfAny @{
+        Id = 'D-DNS-CREATECHILD'; Category = $catDom; Severity = 'Low'
+        Title = 'Strefy DNS, w których każdy użytkownik może tworzyć rekordy (bez rekordu wildcard)'
+        Objects = $dnsRows
+        Description = 'W strefach DNS zintegrowanych z AD każde konto domeny może domyślnie tworzyć nowe rekordy - to jest potrzebne do dynamicznej rejestracji komputerów. Zwykły użytkownik może jednak zarejestrować nieistniejącą nazwę (np. literówkę popularnego serwera) albo rekord wildcard "*" i przechwytywać ruch oraz poświadczenia (ADIDNS spoofing).'
+        Recommendation = 'W każdej strefie utworzyć rekord wildcard "*" (np. wskazujący na adres nieużywany lub serwer DNS) albo odebrać Authenticated Users prawo CreateChild, jeśli rejestrację rekordów wykonuje serwer DHCP. Monitorować tworzenie obiektów dnsNode (zdarzenie 5137). Sprawdzić, czy GlobalQueryBlockList zawiera wpad i isatap.'
+        Fix = (Fx 'Add-DnsServerResourceRecordA -ZoneName <strefa> -Name ''*'' -IPv4Address <adres> -ComputerName <DC>',
+                  'Get-DnsServerGlobalQueryBlockList -ComputerName <DC>')
+        Mitre = 'T1557'
+    }
     $rb = Get-LdapObject -Identity "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties 'msDS-EnabledFeatureBL'
     if (-not @($rb.'msds-enabledfeaturebl' | Where-Object { $_ }).Count) {
         Add-Finding @{
@@ -1791,6 +1908,30 @@ if (-not $SkipDCChecks) {
     $dcCbt   = [System.Collections.Generic.List[object]]::new()
     $dcNtlm  = [System.Collections.Generic.List[object]]::new()
     $dcUnk   = [System.Collections.Generic.List[object]]::new()
+    $dcSess  = [System.Collections.Generic.List[object]]::new()
+    $dcAnon  = [System.Collections.Generic.List[object]]::new()
+
+    # NetSessionEnum (poziom 10) zwykłym kontem: 0/234 = lista sesji dostępna (brak NetCease), 5 = odmowa dostępu
+    if (-not ('PepixNetApi' -as [type])) {
+        try {
+            Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PepixNetApi {
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetSessionEnum(string server, string client, string user, int level, out IntPtr buf, int prefmax, out int read, out int total, ref int resume);
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buf);
+    public static int Probe(string server) {
+        IntPtr b; int r, t, h = 0;
+        int rc = NetSessionEnum(server, null, null, 10, out b, -1, out r, out t, ref h);
+        if (b != IntPtr.Zero) NetApiBufferFree(b);
+        return rc;
+    }
+}
+'@
+        } catch { $dcUnk.Add([pscustomobject]@{ DC = '(wszystkie)'; Test = 'NetSessionEnum'; Metoda = "Add-Type: $($_.Exception.Message)" }) }
+    }
 
     foreach ($dc in $dcs) {
         Invoke-Check "DC-$($dc.Name)" {
@@ -1832,6 +1973,25 @@ if (-not $SkipDCChecks) {
             switch ($st.SMB1) {
                 'Tak' { $dcSmb1.Add([pscustomobject]@{ DC = $h; Wynik = 'SMBv1 przyjmuje połączenia'; Metoda = $st.SMB1Src }) }
                 '?'   { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = 'SMBv1 (brak połączenia z TCP 445)'; Metoda = $st.SMB1Src }) }
+            }
+            # Sondy behawioralne (zwykłe konto, bez zmian na DC): wyliczanie sesji SMB i anonimowe zapytanie LDAP
+            if ('PepixNetApi' -as [type]) {
+                $rc = [PepixNetApi]::Probe("\\$h")
+                if ($rc -in 0, 234) { $dcSess.Add([pscustomobject]@{ DC = $h; Wynik = 'NetSessionEnum dostępne dla zwykłego konta'; Metoda = 'NetSessionEnum poziom 10' }) }
+                elseif ($rc -ne 5) { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = "NetSessionEnum (kod $rc)"; Metoda = 'NetSessionEnum poziom 10' }) }
+            }
+            $anonDe = $null; $anonS = $null
+            try {
+                $anonDe = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$h/$domainDn", $null, $null, [System.DirectoryServices.AuthenticationTypes]::Anonymous)
+                $anonS  = New-Object System.DirectoryServices.DirectorySearcher -ArgumentList $anonDe, '(&(objectCategory=person)(objectClass=user))'
+                $anonS.SizeLimit = 1; [void]$anonS.PropertiesToLoad.Add('sAMAccountName')
+                $hit = $anonS.FindOne()
+                if ($hit) { $dcAnon.Add([pscustomobject]@{ DC = $h; Wynik = "anonimowe zapytanie LDAP zwróciło konto $($hit.Properties['samaccountname'])"; Metoda = 'LDAP bez uwierzytelnienia' }) }
+            } catch {
+                $null = $_   # oczekiwane: "operations error" = operacje anonimowe zablokowane
+            } finally {
+                if ($anonS) { $anonS.Dispose() }
+                if ($anonDe) { $anonDe.Dispose() }
             }
             if ($st.Ldap -ne 2) { $dcLdap.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Ldap $mapLdap); Zrodlo = $st.LdapSrc }) }
             if ($st.Cbt  -ne 2) { $dcCbt.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Cbt $mapCbt); Zrodlo = $st.CbtSrc }) }
@@ -1878,8 +2038,82 @@ if (-not $SkipDCChecks) {
         Mitre = 'T1557.001'
     }
     Add-IfAny @{
+        Id = 'DC-ANONLDAP'; Category = $catDC; Severity = 'High'; Title = 'DC odpowiada na anonimowe zapytania LDAP o konta'; Objects = $dcAnon
+        Description = 'Bez logowania można pobrać listę kont i grup domeny (anonimowy LDAP). Atakujący w sieci lokalnej zdobywa w ten sposób nazwy kont do zgadywania haseł i obraz struktury domeny. Zwykle wynika to z dSHeuristics (7. znak = 2) połączonego z uprawnieniami ANONYMOUS LOGON lub Everyone (np. w Pre-Windows 2000 Compatible Access).'
+        Recommendation = 'Usunąć 7. znak "2" z dSHeuristics (patrz D-DSHEURISTICS) i usunąć Anonymous Logon / Everyone z Pre-Windows 2000 Compatible Access. Wcześniej ustalić, czy dostępu anonimowego nie używa jakieś urządzenie lub aplikacja (np. stare drukarki, skanery, systemy Unix).'
+        Fix = (Fx '# dSHeuristics: CN=Directory Service,CN=Windows NT,CN=Services,CN=Configuration,... (ADSI Edit) - ustawić 7. znak na 0',
+                  '([ADSI]''LDAP://<SID=S-1-5-32-554>'').Remove(''LDAP://<SID=S-1-5-7>'')')
+        Mitre = 'T1087.002'
+    }
+    Add-IfAny @{
+        Id = 'DC-NETSESSION'; Category = $catDC; Severity = 'Low'; Title = 'Zwykłe konto może wyliczać sesje SMB na DC (brak NetCease)'; Objects = $dcSess
+        Description = 'NetSessionEnum pokazuje, z jakich komputerów zalogowani są użytkownicy - także administratorzy. Narzędzia typu BloodHound używają tego do wskazania stacji, z których najłatwiej przejąć konto administratora domeny.'
+        Recommendation = 'Ograniczyć NetSessionEnum do administratorów (zmiana uprawnień SrvsvcSessionInfo, tzw. NetCease) na DC i serwerach, a docelowo na wszystkich komputerach; wymaga restartu usługi Server.'
+        Fix = (Fx '# skrypt NetCease.ps1 (Microsoft, PowerShell Gallery) uruchomiony na DC, potem:', 'Restart-Service -Name LanmanServer -Force')
+        Mitre = 'T1049'
+    }
+    Add-IfAny @{
         Id = 'DC-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'; Title = 'Testy DC nierozstrzygnięte'; Objects = $dcUnk
         Description = 'Nie udało się ustalić wyniku (brak łączności, zapora lub brak dostępu). Powtórzyć z innej stacji lub z przełącznikiem -UseWinRM.'
+    }
+}
+#endregion
+
+#region ---------- GPO w całej domenie (wszystkie podlinkowane) ----------
+# Ustawienia, które powinny obejmować wszystkie komputery, nie tylko DC (te sprawdza CIS). Odczyt Registry.pol i preferencji z SYSVOL.
+if (-not $SkipDCChecks) {
+    Invoke-Check 'GPO-ALL' {
+        $gpoReg = @(Get-LinkedGpoRegistry | Where-Object { -not $_.Deleted })
+        $pick = { param([string]$KeyEnd, [string]$Name)
+                  @($gpoReg | Where-Object { $_.Key -match ([regex]::Escape($KeyEnd) + '$') -and (-not $Name -or $_.Name -eq $Name) }) }
+        $row  = { [pscustomobject]@{ GPO = $_.Gpo; Ustawienie = "$($_.Key)\$($_.Name)"; Wartosc = "$($_.Data)" } }
+
+        $ll = & $pick 'Windows NT\DNSClient' 'EnableMulticast'
+        if (-not @($ll | Where-Object { "$($_.Data)" -eq '0' }).Count) {
+            Add-Finding @{
+                Id = 'D-GPO-LLMNR'; Category = $catDom; Severity = 'Medium'
+                Title = 'Żadne podlinkowane GPO nie wyłącza LLMNR'
+                Objects = ($ll | ForEach-Object $row)
+                Description = 'Gdy nazwy nie da się rozwiązać w DNS (literówka, nieistniejący udział), Windows pyta o nią całą sieć lokalną przez LLMNR (oraz NetBIOS i mDNS). Atakujący w tej samej sieci odpowiada na takie zapytania i przechwytuje skróty NTLMv2 użytkowników (narzędzia typu Responder), które łamie offline albo przekazuje dalej (relay).'
+                Recommendation = 'GPO dla wszystkich komputerów: Konfiguracja komputera > Szablony administracyjne > Sieć > Klient DNS > Wyłącz rozpoznawanie nazw multiemisji = Włączone. Dodatkowo wyłączyć NetBIOS over TCP/IP (opcja DHCP 001 dla klientów Microsoft lub ustawienie karty) i mDNS.'
+                Fix = (Fx '# GPO: Computer Configuration > Administrative Templates > Network > DNS Client > Turn off multicast name resolution = Enabled',
+                          'reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" /v EnableMulticast   # weryfikacja na komputerze')
+                Mitre = 'T1557.001'
+            }
+        }
+
+        $ps = & $pick 'PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging'
+        if (-not @($ps | Where-Object { "$($_.Data)" -eq '1' }).Count) {
+            Add-Finding @{
+                Id = 'D-GPO-PSLOG'; Category = $catDom; Severity = 'Low'
+                Title = 'Żadne podlinkowane GPO nie włącza rejestrowania bloków skryptów PowerShell'
+                Objects = ($ps | ForEach-Object $row)
+                Description = 'Bez Script Block Logging (zdarzenie 4104) w dziennikach nie ma treści wykonanych poleceń PowerShell, także zaciemnionych i ładowanych z pamięci. PowerShell jest podstawowym narzędziem atakujących po włamaniu, więc brak tych zdarzeń utrudnia wykrycie i analizę incydentu.'
+                Recommendation = 'Włączyć Script Block Logging (i opcjonalnie Module Logging) GPO dla wszystkich komputerów, zwiększyć rozmiar dziennika Microsoft-Windows-PowerShell/Operational i przekazywać zdarzenia 4104 do SIEM.'
+                Fix = (Fx '# GPO: Computer Configuration > Administrative Templates > Windows Components > Windows PowerShell > Turn on PowerShell Script Block Logging = Enabled')
+                Mitre = 'T1059.001'
+            }
+        }
+
+        # Hardened UNC Paths: Windows 10+ domyślnie wymaga uwierzytelnienia i integralności dla SYSVOL/NETLOGON; starsze systemy - tylko z GPO
+        $hp   = & $pick 'NetworkProvider\HardenedPaths' ''
+        $sysv = @($hp | Where-Object { $_.Name -match 'SYSVOL|NETLOGON|^\\\\\*\\?\*?$' })
+        $weak = @($sysv | Where-Object { "$($_.Data)" -match '(RequireMutualAuthentication|RequireIntegrity)\s*=\s*0' })
+        $legacy = 0
+        foreach ($o in $invOs) { if ("$($o.System)" -match 'Windows (7|8|Vista|XP)|Server.*(2003|2008|2012)') { $legacy += [int]$o.Komputery } }
+        if ($weak.Count -or (-not $sysv.Count -and $legacy -gt 0)) {
+            Add-Finding @{
+                Id = 'D-GPO-HARDPATH'; Category = $catDom; Severity = $(if ($weak.Count) { 'Medium' } else { 'Low' })
+                Title = $(if ($weak.Count) { 'GPO osłabia ochronę ścieżek SYSVOL/NETLOGON (Hardened UNC Paths)' } else { "Brak Hardened UNC Paths dla SYSVOL/NETLOGON przy $legacy kontach komputerów ze starszym Windows" })
+                Objects = ($(if ($weak.Count) { $weak } else { $hp }) | ForEach-Object $row)
+                Description = 'Komputery pobierają GPO i skrypty logowania z SYSVOL i NETLOGON. Bez wymogu wzajemnego uwierzytelnienia i integralności atakujący w sieci może podsunąć własne zasady lub skrypty (MS15-011, MS15-014) i uruchomić kod z uprawnieniami SYSTEM. Windows 10/11 i Server 2016+ chronią te ścieżki domyślnie, o ile GPO tego nie wyłącza; Windows 7/8.1 i Server 2008/2012 wymagają ustawienia z GPO.'
+                Recommendation = 'Usunąć wartości RequireMutualAuthentication=0 / RequireIntegrity=0 z GPO. Dla starszych systemów ustawić Hardened UNC Paths: \\*\SYSVOL i \\*\NETLOGON = RequireMutualAuthentication=1, RequireIntegrity=1.'
+                Fix = (Fx '# GPO: Computer Configuration > Administrative Templates > Network > Network Provider > Hardened UNC Paths',
+                          '#   \\*\SYSVOL   = RequireMutualAuthentication=1, RequireIntegrity=1',
+                          '#   \\*\NETLOGON = RequireMutualAuthentication=1, RequireIntegrity=1')
+                Mitre = 'T1557'
+            }
+        }
     }
 }
 #endregion

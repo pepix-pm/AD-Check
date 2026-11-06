@@ -122,6 +122,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-ADM500 | Medium | Wiek hasła wbudowanego Administratora | T1078.002 |
 | P-ADMLOGIN | Medium | Wbudowane konto Administrator używane w ostatnich 35 dniach | T1078.002 |
 | P-PROTECTED | Low | Konta uprzywilejowane spoza Protected Users (bez kont z SPN i RID 500) | T1550.002 |
+| P-ADMINMAIL | Low | Konta uprzywilejowane z adresem e-mail | T1566 |
 | U-UNCONSTR | Critical | Użytkownicy z delegacją nieograniczoną | T1558 |
 | U-ASREP | High | Brak preautentykacji Kerberos | T1558.004 |
 | U-PWDNOTREQ | High | Flaga PASSWD_NOTREQD | T1078.002 |
@@ -161,9 +162,16 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-DFL | Low | Poziom funkcjonalny domeny < 2016 | – |
 | D-FFL | Low | Poziom funkcjonalny lasu < 2016 | – |
 | D-PREWIN2000 | High / Low | Everyone, Anonymous Logon (High) lub Authenticated Users (Low) w Pre-Windows 2000 Compatible Access | T1087.002 |
+| D-DSHEURISTICS | High / Medium | dSHeuristics: anonimowe operacje LDAP (7. znak) lub wyłączone poprawki CVE-2021-42291 (28./29. znak) | T1087.002 |
+| D-DNS-CREATECHILD | Low | Strefy DNS z CreateChild dla Authenticated Users bez rekordu wildcard (ADIDNS spoofing) | T1557 |
+| D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR | T1557.001 |
+| D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
+| D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging | T1059.001 |
 | DC-OS-EOL | High | DC z systemem bez wsparcia | T1210 |
 | DC-SPOOLER | High | Print Spooler na DC | T1187 |
 | DC-SMB1 | High | SMBv1 na DC | T1210 |
+| DC-ANONLDAP | High | DC zwraca konta na anonimowe zapytanie LDAP (sonda bez uwierzytelnienia) | T1087.002 |
+| DC-NETSESSION | Low | Zwykłe konto może wyliczać sesje SMB na DC (NetSessionEnum, brak NetCease) | T1049 |
 | DC-LDAPSIGN | Medium | Podpisywanie LDAP niewymagane | T1557 |
 | DC-LDAPCBT | Medium | LDAP channel binding niewymuszony | T1557 |
 | DC-NTLMV1 | Medium | DC akceptuje NTLMv1/LM | T1557.001 |

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.18 – 2026-11-06
+
+Nowe testy (zwykłe konto, tylko odczyt):
+- **DC-ANONLDAP** – sonda: czy DC zwraca konta na anonimowe zapytanie LDAP.
+- **DC-NETSESSION** – sonda NetSessionEnum: czy zwykłe konto widzi sesje SMB na DC (brak NetCease).
+- **D-DSHEURISTICS** – anonimowe operacje LDAP (7. znak) i wyłączone poprawki CVE-2021-42291 (28./29. znak).
+- **D-DNS-CREATECHILD** – strefy DNS w AD z CreateChild dla szerokich grup i bez rekordu wildcard (ADIDNS spoofing).
+- **D-GPO-LLMNR**, **D-GPO-HARDPATH**, **D-GPO-PSLOG** – ustawienia z wszystkich podlinkowanych GPO (domena, OU, lokacje; Registry.pol i preferencje rejestru), nie tylko z GPO kontrolerów domeny.
+- **P-ADMINMAIL** – konta uprzywilejowane z adresem e-mail.
+- Funkcje `Get-LinkedGpoRegistry` i `Get-DsHeuristicsChar`.
+
 ## 0.17 – 2026-11-06
 
 Nowe testy (LDAP, zwykłe konto):

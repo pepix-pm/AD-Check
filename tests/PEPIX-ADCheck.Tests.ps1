@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -188,5 +188,17 @@ Describe 'Test-IpInSubnet' {
         @{ Ip = '10.0.0.1';     Cidr = 'fe80::/64';      Wynik = $false }
     ) {
         Test-IpInSubnet $Ip $Cidr | Should -Be $Wynik
+    }
+}
+
+Describe 'Get-DsHeuristicsChar' {
+    It 'brak wartości to 0' { Get-DsHeuristicsChar '' 7 | Should -Be '0' }
+    It 'krótsza wartość to 0' { Get-DsHeuristicsChar '00000002' 28 | Should -Be '0' }
+    It 'siódmy znak' { Get-DsHeuristicsChar '0000002' 7 | Should -Be '2' }
+    It 'znak 28 i 29' {
+        $v = '0000000001000000000200000000' + '1' + '1'
+        Get-DsHeuristicsChar $v 28 | Should -Be '0'
+        Get-DsHeuristicsChar $v 29 | Should -Be '1'
+        Get-DsHeuristicsChar $v 30 | Should -Be '1'
     }
 }
