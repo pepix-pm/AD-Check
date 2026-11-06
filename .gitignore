@@ -1,0 +1,10 @@
+# Raporty zawierają dane klientów - nigdy do repo
+raporty/
+*.html
+*.json
+*.csv
+
+# Systemowe / edytory
+.vscode/
+*.log
+Thumbs.db
