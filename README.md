@@ -148,6 +148,9 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-LDAPSIGN | Medium | Podpisywanie LDAP niewymagane | T1557 |
 | DC-LDAPCBT | Medium | LDAP channel binding niewymuszony | T1557 |
 | DC-NTLMV1 | Medium | DC akceptuje NTLMv1/LM | T1557.001 |
+| DC-PATCH-OLD | High | DC bez aktualnych poprawek (UBR niższy niż ostatni Patch Tuesday; z WinRM także ostatnia poprawka > 60 dni) | T1210 |
+| DC-PATCH-DIFF | Medium | DC z tym samym systemem na różnym poziomie poprawek | T1210 |
+| DC-REBOOT | Medium | DC oczekujący na restart lub bez restartu > 60 dni (tylko `-UseWinRM`) | T1210 |
 | DC-CIS-REG | wg najgorszego ustawienia | Opcje zabezpieczeń i szablony administracyjne DC niezgodne z CIS L1 (42 ustawienia) | – |
 | DC-CIS-AUDIT | wg najgorszego ustawienia | Zaawansowane zasady audytu DC niezgodne z CIS L1 (24 podkategorie) | T1562.002 |
 | DC-CIS-RIGHTS | wg najgorszego ustawienia | Przypisanie praw użytkowników na DC niezgodne z CIS L1 (16 praw) | T1078.002 |
@@ -165,6 +168,12 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-PORTS | Medium | Niedostępne porty usług AD na DC (53, 88, 135, 389, 445, 9389, 3268) | – |
 | D-GPO-SYNC | Medium | Wersja GPO w AD różna od GPT.INI w SYSVOL na DC | – |
 | DC-DNS-SRV | Medium | DC bez rekordu SRV `_ldap._tcp.dc._msdcs` | – |
+
+## Aktualizacje kontrolerów domeny
+
+Poziom poprawek to numer UBR (część wersji po kropce, np. `20348.5761`). Zwykłe konto odczytuje go przez zdalny rejestr – klucz `SOFTWARE\Microsoft\Windows NT\CurrentVersion` jest domyślnie dostępny zdalnie dla użytkowników domeny (wymaga działającej usługi Remote Registry na DC). Z `-UseWinRM` dochodzą: data i numer ostatniej poprawki, ostatni restart, oczekujący restart i źródło aktualizacji (WSUS).
+
+Wzorzec to UBR ostatniej comiesięcznej aktualizacji zabezpieczeń (`$patchRef`, `$patchRefDate` w skrypcie) – **aktualizować co miesiąc po Patch Tuesday**. Gdy wzorzec ma ponad 40 dni, raport o tym ostrzega. Niezależnie od wzorca porównywane są DC z tym samym systemem między sobą.
 
 ## Konfiguracja DC wg CIS
 

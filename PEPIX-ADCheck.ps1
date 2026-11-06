@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.7)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.8)
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta (moduł RSAT ActiveDirectory).
@@ -32,7 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.7'
+$Version = '0.8'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -1382,6 +1382,119 @@ if (-not $SkipDCChecks) {
 }
 #endregion
 
+#region ---------- aktualizacje kontrolerów domeny ----------
+# Poziom poprawek = UBR (numer po kropce, np. 20348.5761). Zwykłe konto: zdalny rejestr - ścieżka SOFTWARE\Microsoft\Windows NT\CurrentVersion
+# jest domyślnie na liście AllowedExactPaths, więc czyta ją każdy użytkownik domeny (wymaga działającej usługi Remote Registry).
+# -UseWinRM dodatkowo: ostatnia zainstalowana poprawka, ostatni restart, oczekujący restart, źródło aktualizacji (WSUS).
+# AKTUALIZOWAĆ CO MIESIĄC: UBR z ostatniej comiesięcznej aktualizacji zabezpieczeń (Patch Tuesday) i jej data.
+$patchRefDate = [datetime]'2026-10-13'
+$patchRef     = @{ 14393 = 9612; 17763 = 9376; 20348 = 5761; 26100 = 33650 }   # Server 2016 / 2019 / 2022 / 2025
+$invPatch     = [System.Collections.Generic.List[object]]::new()
+if (-not $SkipDCChecks) {
+    Invoke-Check 'DC-PATCH' {
+        foreach ($dc in $dcs) {
+            $h = $dc.HostName
+            $build = 0; if ("$($dc.OperatingSystemVersion)" -match '\((\d+)\)') { $build = [int]$Matches[1] }
+            $ubr = $null; $err = ''; $win = $null
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $h)
+                $k = $base.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion')
+                if ($k) {
+                    $ubr = $k.GetValue('UBR')
+                    $cb  = $k.GetValue('CurrentBuildNumber'); if ($cb) { $build = [int]$cb }
+                    $k.Close()
+                }
+                $base.Close()
+            } catch { $err = "zdalny rejestr: $((Get-InnerException $_.Exception).Message)" }
+
+            if ($UseWinRM) {
+                try {
+                    $win = Invoke-Command -ComputerName $h -ErrorAction Stop -ScriptBlock {
+                        $os = Get-CimInstance Win32_OperatingSystem -Verbose:$false
+                        $hf = Get-HotFix | Where-Object InstalledOn | Sort-Object InstalledOn -Descending | Select-Object -First 1
+                        $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+                        $pend = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or
+                                (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+                        $wu = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction SilentlyContinue
+                        [pscustomobject]@{ UBR = $cv.UBR; Build = $cv.CurrentBuildNumber; LastBoot = $os.LastBootUpTime
+                                           LastHotfix = $hf.InstalledOn; LastKB = $hf.HotFixID; Pending = $pend; WSUS = $wu.WUServer }
+                    }
+                    if ($null -eq $ubr) { $ubr = $win.UBR; $build = [int]$win.Build }
+                } catch { $err = (@($err, "WinRM: $($_.Exception.Message)") | Where-Object { $_ }) -join '; ' }
+            }
+
+            $ref  = if ($patchRef.ContainsKey($build)) { $patchRef[$build] } else { $null }
+            $stan = if ($null -eq $ubr) { 'nieznany' }
+                    elseif ($null -eq $ref) { 'brak wzorca dla tej wersji' }
+                    elseif ([int]$ubr -ge $ref) { 'aktualny' }
+                    else { 'nieaktualny' }
+            if ($stan -ne 'nieaktualny' -and $win -and $win.LastHotfix -and $win.LastHotfix -lt $now.AddDays(-60)) { $stan = 'ostatnia poprawka > 60 dni' }
+
+            $row = [pscustomobject]@{
+                DC                 = $h
+                System             = $dc.OperatingSystem
+                Wersja             = $(if ($null -ne $ubr) { "$build.$ubr" } else { "$build.?" })
+                Wzorzec            = $(if ($ref) { "$build.$ref ($(Format-Date $patchRefDate))" } else { '' })
+                Stan               = $stan
+                OstatniaPoprawka   = $(if ($win -and $win.LastHotfix) { "$(Format-Date $win.LastHotfix) $($win.LastKB)" } else { '' })
+                OstatniRestart     = $(if ($win) { Format-Date $win.LastBoot } else { '' })
+                OczekujeRestartu   = $(if ($win) { if ($win.Pending) { 'Tak' } else { 'Nie' } } else { '' })
+                ZrodloAktualizacji = $(if ($win) { if ($win.WSUS) { "WSUS: $($win.WSUS)" } else { 'Windows Update (brak polityki WSUS)' } } else { '' })
+                Blad               = $err
+                Build              = $build
+                Ubr                = $ubr
+                Boot               = $(if ($win) { $win.LastBoot } else { $null })
+                Pending            = $(if ($win) { [bool]$win.Pending } else { $false })
+            }
+            $invPatch.Add($row)
+        }
+
+        $show = { $_ | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending }
+        $refNote = if (($now - $patchRefDate).TotalDays -gt 40) { " Uwaga: wzorzec poprawek w skrypcie pochodzi z $(Format-Date $patchRefDate) i może być nieaktualny - DC może być starszy, niż wskazuje ten test." } else { '' }
+
+        Add-IfAny @{
+            Id = 'DC-PATCH-OLD'; Category = $catDC; Severity = 'High'
+            Title = 'Kontrolery domeny bez aktualnych poprawek zabezpieczeń'
+            Objects = ($invPatch | Where-Object { $_.Stan -in 'nieaktualny', 'ostatnia poprawka > 60 dni' } | ForEach-Object $show)
+            Description = "Poziom poprawek DC (kolumna Wersja) jest niższy niż comiesięczna aktualizacja zabezpieczeń z $(Format-Date $patchRefDate) (kolumna Wzorzec) albo ostatnia poprawka została zainstalowana ponad 60 dni temu. Niezałatane DC są głównym celem ataków (np. podatności Kerberos, Netlogon, LDAP, Print Spooler).$refNote"
+            Recommendation = 'Zainstalować najnowszą aktualizację zbiorczą na wszystkich DC (po jednym, przy zdrowej replikacji, z restartem). Ustalić stały cykl aktualizacji DC - np. w ciągu 14 dni od Patch Tuesday - i monitorować jego wykonanie.'
+            Fix = (Fx 'Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5   # na DC', '# Windows Update / WSUS: zatwierdzić i zainstalować najnowszą aktualizację zbiorczą (LCU) wraz z SSU', 'repadmin /replsummary   # przed i po restarcie każdego DC')
+            Mitre = 'T1210'
+        }
+
+        # Różny poziom poprawek DC z tym samym systemem - przydatne, gdy brak wzorca albo wzorzec jest stary
+        $maxUbr = @{}
+        foreach ($r in @($invPatch | Where-Object { $null -ne $_.Ubr })) {
+            if (-not $maxUbr.ContainsKey($r.Build) -or [int]$r.Ubr -gt $maxUbr[$r.Build]) { $maxUbr[$r.Build] = [int]$r.Ubr }
+        }
+        Add-IfAny @{
+            Id = 'DC-PATCH-DIFF'; Category = $catDC; Severity = 'Medium'
+            Title = 'Kontrolery domeny z tym samym systemem na różnym poziomie poprawek'
+            Objects = ($invPatch | Where-Object { $null -ne $_.Ubr -and $_.Stan -notin 'nieaktualny', 'ostatnia poprawka > 60 dni' -and [int]$_.Ubr -lt $maxUbr[$_.Build] } | ForEach-Object $show)
+            Description = 'Część DC ma starsze poprawki niż pozostałe DC z tym samym systemem. Oznacza to, że proces aktualizacji nie obejmuje wszystkich kontrolerów domeny.'
+            Recommendation = 'Ujednolicić poziom poprawek; sprawdzić, dlaczego dany DC nie otrzymuje aktualizacji (grupa WSUS, okno serwisowe, błędy instalacji).'
+            Fix = (Fx 'Get-WinEvent -LogName ''Microsoft-Windows-WindowsUpdateClient/Operational'' -MaxEvents 20   # na DC')
+            Mitre = 'T1210'
+        }
+        Add-IfAny @{
+            Id = 'DC-REBOOT'; Category = $catDC; Severity = 'Medium'
+            Title = 'Kontrolery domeny oczekujące na restart lub bez restartu ponad 60 dni'
+            Objects = ($invPatch | Where-Object { $_.Pending -or ($_.Boot -and $_.Boot -lt $now.AddDays(-60)) } | ForEach-Object $show)
+            Description = 'Zainstalowane aktualizacje zbiorcze zaczynają działać dopiero po restarcie. DC oczekujący na restart lub działający bez restartu od miesięcy jest w praktyce niezałatany.'
+            Recommendation = 'Zaplanować restart DC w oknie serwisowym (po jednym, przy zdrowej replikacji).'
+            Fix = (Fx 'Restart-Computer -ComputerName <DC>   # w oknie serwisowym, po jednym DC')
+            Mitre = 'T1210'
+        }
+        Add-IfAny @{
+            Id = 'DC-PATCH-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'
+            Title = 'Nie ustalono poziomu poprawek DC'
+            Objects = ($invPatch | Where-Object { $_.Stan -eq 'nieznany' } | ForEach-Object { [pscustomobject]@{ DC = $_.DC; Blad = $_.Blad } })
+            Description = 'Odczyt zdalnego rejestru nie powiódł się - zwykle zatrzymana usługa Remote Registry na DC lub zapora. Powtórzyć z przełącznikiem -UseWinRM.'
+        }
+    }
+}
+#endregion
+
 #region ---------- kondycja domeny i replikacja ----------
 # Wszystko zwykłym kontem: metadane replikacji przez ADWS, SYSVOL przez SMB, czas przez NTP (w32tm), DNS przez resolver stacji.
 $healthUnk = [System.Collections.Generic.List[object]]::new()
@@ -1709,7 +1822,8 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
 [ordered]@{ Meta = $meta; Podsumowanie = $summary; Porownanie = $diff; Znaleziska = $sorted
-            Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs) } } |
+            Inwentaryzacja = [ordered]@{ Domena = $invDomain; DC = $invDCs; GrupyUprzywilejowane = @($invPriv); Zaufania = $invTrusts; Systemy = @($invOs)
+                                  AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
 $sorted | Select-Object Id, Category, Severity, Title, Count, Recommendation, Mitre |
@@ -1847,6 +1961,7 @@ foreach ($f in $sorted) {
 [void]$sb.Append('<div class="lbl">Kontrolery domeny</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invDCs))
 [void]$sb.Append('<div class="lbl">Członkowie grup uprzywilejowanych (rekursywnie)</div>'); [void]$sb.Append((ConvertTo-HtmlTable @($invPriv)))
 [void]$sb.Append('<div class="lbl">Relacje zaufania</div>'); [void]$sb.Append((ConvertTo-HtmlTable $invTrusts))
+[void]$sb.Append("<div class=`"lbl`">Poziom aktualizacji kontrolerów domeny (wzorzec: Patch Tuesday $(Format-Date $patchRefDate))</div>"); [void]$sb.Append((ConvertTo-HtmlTable @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending)))
 [void]$sb.Append("<div class=`"lbl`">Systemy operacyjne (aktywne konta komputerów; AktywneOstatnio = logowanie w ciągu $StaleDays dni)</div>"); [void]$sb.Append((ConvertTo-HtmlTable @($invOs)))
 [void]$sb.Append('</section>')
 
