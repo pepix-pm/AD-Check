@@ -51,13 +51,22 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 
 ## Uruchomienie z GitHuba (bez kopiowania pliku)
 
-Repozytorium jest publiczne – token nie jest potrzebny. Wklej w PowerShellu na stacji w domenie klienta:
+Repozytorium jest publiczne – token nie jest potrzebny. U klienta uruchamiaj **wyłącznie wydanie z tagiem i ze sprawdzeniem SHA256**. Wklej w PowerShellu na stacji w domenie klienta:
+
+```powershell
+$v='v0.19'; $h='8F95814C31BFCB06AF892E1013A66A31F7CA076E972CC646CBC9B3851CD99A0F'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $b=(New-Object Net.WebClient).DownloadData("https://raw.githubusercontent.com/pepix-pm/AD-Check/$v/PEPIX-ADCheck.ps1"); if (([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)) -replace '-') -ne $h) { throw "SHA256 pobranego pliku nie zgadza się z wydaniem $v - skrypt NIE został uruchomiony" }; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b).TrimStart([char]0xFEFF))) -Klient KLIENT
+```
+
+- `$v` i `$h` to tag i SHA256 wydania (lista wydań: zakładka *Releases*). Skrypt uruchamia się tylko wtedy, gdy pobrany plik ma dokładnie ten hash – podmiana pliku lub tagu w repozytorium go zatrzyma.
+- **Hash przechowuj poza GitHubem** (np. w instrukcji wewnętrznej PEPIX) i stamtąd kopiuj polecenie. Hash pobrany z tego samego repozytorium nie chroni przed przejęciem konta GitHub, bo atakujący zmieniłby oba.
+- Pierwsza część włącza TLS 1.2 – bez niej Windows Server 2012 R2/2016 nie połączy się z GitHubem („Nie można utworzyć bezpiecznego kanału SSL/TLS”). Na Windows 10/11 nie przeszkadza.
+- Uruchamianie kodu pobranego z sieci bez zapisu na dysk może wywołać alert EDR (zachowanie podobne do technik „fileless”). W organizacjach z EDR, AppLocker lub WDAC pobierz plik z wydania, sprawdź hash (`Get-FileHash .\PEPIX-ADCheck.ps1`) i uruchom go z dysku; przed przeglądem uprzedź SOC klienta.
+
+Gałąź `main` służy wyłącznie do rozwoju i testów w laboratorium. Wersja nieoznaczona tagiem (np. do testu przed wydaniem):
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
-
-Pierwsza część włącza TLS 1.2 – bez niej Windows Server 2012 R2/2016 nie połączy się z GitHubem („Nie można utworzyć bezpiecznego kanału SSL/TLS”). Na Windows 10/11 nie przeszkadza.
 
 Sprawdzenie składni bez uruchamiania (np. po zmianach w repo):
 
@@ -68,7 +77,7 @@ $e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm 
 Uwagi:
 - Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
 - `.TrimStart([char]0xFEFF)` usuwa znacznik BOM (plik musi go mieć, żeby PowerShell 5.1 z pliku poprawnie czytał polskie znaki). GitHub wysyła `charset=utf-8`, więc `irm` dekoduje polskie znaki poprawnie.
-- U klienta używaj konkretnej, sprawdzonej wersji: zamień `main` w adresie na tag, np. `v0.5`. `main` może zawierać zmiany jeszcze nieprzetestowane.
+- Wydanie (tag) powstaje dopiero po przetestowaniu wersji w środowisku testowym i u co najmniej jednego klienta. Tagi i gałąź `main` są chronione przed nadpisaniem i usunięciem.
 - Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je ze stacji.
 - **Repozytorium jest publiczne** – tym bardziej obowiązuje zasada: żadnych nazw klientów, domen, kont ani wyników w repo.
 
@@ -244,7 +253,23 @@ Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezale�
 
 ## Ograniczenia
 
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS), uprawnień DCSync ani stacji końcowych. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe; przed wykonaniem wymagają weryfikacji i zgłoszenia zmiany.
+Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze usług certyfikatów (ADCS) ani stacji końcowych. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder i GPO podpiętych do domeny i OU Domain Controllers – nie na pojedynczych kontach, grupach, OU i komputerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe; przed wykonaniem wymagają weryfikacji i zgłoszenia zmiany.
+
+## Zgoda na badanie i ślad w środowisku
+
+Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie jest pisemna zgoda jego właściciela** (np. umowa lub zlecenie przeglądu z określonym zakresem i terminem).
+
+„Tylko odczyt” znaczy, że skrypt niczego nie zmienia – nie znaczy, że jest niewidoczny. Wykonuje:
+
+- zapytania LDAP o wszystkie konta, grupy, komputery, GPO, ACL i konfigurację lasu,
+- odczyt SYSVOL po SMB (GPO, Registry.pol, GptTmpl.inf),
+- sondy kontrolerów domeny: dostępność portów usług AD, potok `\\DC\pipe\spoolss`, wyliczanie sesji SMB (NetSessionEnum), **próbę anonimowego zapytania LDAP**,
+- odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
+- w trybie `-UseWinRM`: zdalne odczyty rejestru i usług na DC.
+
+Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z klientem i uprzedź jego SOC.
+
+`-UseWinRM` nie przyjmuje haseł: używa tożsamości Kerberos bieżącej sesji (np. po `runas /netonly`). Poświadczenia nie trafiają do raportu, plików wynikowych ani konsoli; na DC zostaje zwykły ślad logowania sieciowego (zdarzenie 4624, typ 3) i – jeśli włączone – rejestrowanie poleceń PowerShell.
 
 ## Licencja
 
