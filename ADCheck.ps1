@@ -72,6 +72,7 @@ if ($braki.Count -eq 0) {
     # Odczyt AD przez LDAP (System.DirectoryServices, wbudowane w Windows) - bez modułu RSAT ActiveDirectory
     try {
         $rde = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Server/RootDSE")
+        $rde.psbase.RefreshCache()   # jawne powiązanie: błąd logowania (np. złe hasło przy runas /netonly) daje czytelny komunikat zamiast pustych właściwości
         $rootDse = [pscustomobject]@{
             defaultNamingContext       = [string]$rde.Properties['defaultNamingContext'].Value
             configurationNamingContext = [string]$rde.Properties['configurationNamingContext'].Value
@@ -82,7 +83,10 @@ if ($braki.Count -eq 0) {
         $rde.psbase.Dispose()
         if (-not $rootDse.defaultNamingContext) { throw 'pusta odpowiedź RootDSE' }
     } catch {
-        $braki.Add("Brak połączenia LDAP z domeną ($Server): $($_.Exception.Message). Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.")
+        $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        $hint = if ($e.HResult -eq -2147023570) { ' Sprawdź nazwę konta i hasło - przy runas /netonly hasło jest weryfikowane dopiero przy pierwszym połączeniu z domeną.' }
+                else { ' Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.' }
+        $braki.Add("Brak połączenia LDAP z domeną ($Server): $($e.Message.Trim()) (0x$('{0:X8}' -f $e.HResult)).$hint")
     }
 }
 if ($braki.Count -gt 0) {
