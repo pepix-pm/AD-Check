@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.19'
+$Version = '0.20'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -525,6 +525,10 @@ $ruleCatalog = @(
     @{ Id = 'D-GPO-HARDPATH';    O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'Hardened UNC Paths dla SYSVOL/NETLOGON' }
     @{ Id = 'D-GPO-PSLOG';       O = 'A'; M = 'Audyt';                        C = 'GPO-ALL';      W = 'DC'; T = 'Rejestrowanie bloków skryptów PowerShell' }
     @{ Id = 'P-ADMINMAIL';       O = 'P'; M = 'Ochrona kont administratorów'; C = 'PRIV';         T = 'Konta uprzywilejowane z adresem e-mail' }
+    @{ Id = 'D-DCSYNC';          O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawo replikacji haseł (DCSync) poza DC i adminami' }
+    @{ Id = 'D-ACL-DOMAIN';      O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawa przejęcia obiektu domeny' }
+    @{ Id = 'D-ACL-ADMINSDHOLDER'; O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';        T = 'Niestandardowe uprawnienia na AdminSDHolder' }
+    @{ Id = 'D-ACL-GPO';         O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Edycja GPO domeny/DC przez nie-adminów' }
 )
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
@@ -582,6 +586,7 @@ $complianceMap = @{
     'Utwardzenie DC'               = @{ N = 'e, g'; I = '8.9' }
     'Kopia i odtwarzanie'          = @{ N = 'c';    I = '8.13' }
     'Uprawnienia domyślne'         = @{ N = 'i';    I = '5.15, 8.9' }
+    'Uprawnienia w katalogu (ACL)' = @{ N = 'i';    I = '5.15, 5.18, 8.2' }
     'Inne'                       = @{ N = 'a';    I = '' }
 }
 
@@ -678,6 +683,10 @@ $planMeta = @{
     'D-GPO-HARDPATH'   = @(0.5, 2, 1, '')
     'D-GPO-PSLOG'      = @(1, 4, 2, 'Rozmiar dziennika i przekazywanie do SIEM')
     'P-ADMINMAIL'      = @(1, 3, 2, 'Wymaga osobnych kont dla administratorów')
+    'D-DCSYNC'         = @(1, 4, 1, 'Konto synchronizacji Entra ID zostawić, ale chronić jak Tier 0')
+    'D-ACL-DOMAIN'     = @(2, 8, 1, 'Exchange: aktualna CU i Setup /PrepareAD')
+    'D-ACL-ADMINSDHOLDER' = @(1, 4, 1, 'Niewyjaśniony wpis traktować jak możliwy incydent')
+    'D-ACL-GPO'        = @(1, 4, 1, 'Przegląd delegacji GPO z klientem')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
 $planStages = @{
@@ -1549,6 +1558,143 @@ Invoke-Check 'COMP-OWNER' {
         Add-Finding @{ Id = 'C-OWNER-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'
                        Title = "Nie odczytano właściciela $noSd z $($created.Count) kont komputerów utworzonych przez użytkowników (mS-DS-CreatorSID)"
                        Description = 'Brak uprawnienia do odczytu deskryptora zabezpieczeń - test C-OWNER nie objął tych obiektów.' }
+    }
+}
+#endregion
+
+#region ---------- uprawnienia (ACL): domena, AdminSDHolder, GPO kontrolerów ----------
+# Odczyt deskryptorów zabezpieczeń zwykłym kontem (domyślnie czytelne dla Authenticated Users). Pomijane ACE Deny,
+# ACE tylko do dziedziczenia (InheritOnly) i podmioty zaufane (SYSTEM, Administrators, DA, EA, kontrolery domeny).
+$aclGuid = @{
+    GetChangesAll      = [guid]'1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'   # DS-Replication-Get-Changes-All
+    GetChangesFiltered = [guid]'89e95b76-444d-4c62-991a-0facbeda640c'   # DS-Replication-Get-Changes-In-Filtered-Set
+    ForceChangePwd     = [guid]'00299570-246d-11d0-a768-00aa006e0529'   # User-Force-Change-Password
+    Member             = [guid]'bf9679c0-0de6-11d0-a285-00aa003049e2'   # atrybut member
+    GpLink             = [guid]'f30e3bbe-9ff0-11d1-b603-0000f80367c1'   # atrybut gPLink
+}
+
+# Niebezpieczne prawa w ACE obiektu AD -> lista opisów (pusta = ACE nieistotny)
+function Get-AceDanger([System.DirectoryServices.ActiveDirectoryAccessRule]$Ace) {
+    $R = [System.DirectoryServices.ActiveDirectoryRights]
+    $r = $Ace.ActiveDirectoryRights; $ot = $Ace.ObjectType
+    $why = [System.Collections.Generic.List[string]]::new()
+    if (($r -band $R::GenericAll) -eq $R::GenericAll) { $why.Add('pełna kontrola (GenericAll)'); return $why }
+    if ($r -band $R::WriteDacl)  { $why.Add('zmiana uprawnień (WriteDacl)') }
+    if ($r -band $R::WriteOwner) { $why.Add('przejęcie własności (WriteOwner)') }
+    if ($r -band $R::WriteProperty) {
+        if ($ot -eq [guid]::Empty)         { $why.Add('zapis wszystkich atrybutów') }
+        elseif ($ot -eq $aclGuid.Member)   { $why.Add('zmiana członkostwa (member)') }
+        elseif ($ot -eq $aclGuid.GpLink)   { $why.Add('podpinanie GPO (gPLink)') }
+    }
+    if ($r -band $R::ExtendedRight) {
+        if ($ot -eq [guid]::Empty)                     { $why.Add('wszystkie prawa rozszerzone (w tym DCSync i reset haseł)') }
+        elseif ($ot -eq $aclGuid.GetChangesAll)        { $why.Add('replikacja haseł (DS-Replication-Get-Changes-All, DCSync)') }
+        elseif ($ot -eq $aclGuid.GetChangesFiltered)   { $why.Add('replikacja zestawu filtrowanego (DS-Replication-Get-Changes-In-Filtered-Set)') }
+        elseif ($ot -eq $aclGuid.ForceChangePwd)       { $why.Add('reset hasła bez znajomości starego') }
+    }
+    $why
+}
+
+# Wiersze z niebezpiecznymi ACE (Allow, nie InheritOnly) podmiotów spoza $Trusted
+function Get-DangerousAces($Sd, [hashtable]$Trusted, [string]$Obj) {
+    if ($Sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { return }
+    foreach ($a in $Sd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($a.AccessControlType -ne 'Allow') { continue }
+        if ($a.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        $sid = $a.IdentityReference.Value
+        if ($Trusted.ContainsKey($sid)) { continue }
+        $why = @(Get-AceDanger $a)
+        if ($why.Count) {
+            [pscustomobject]@{ Obiekt = $Obj; Podmiot = (Resolve-SidName $sid); Prawa = ($why -join '; '); Dziedziczone = $a.IsInherited; SID = $sid }
+        }
+    }
+}
+
+Invoke-Check 'ACL' {
+    $rootSid = $dSid
+    try { $rootSid = (Get-LdapObject -Identity $rootDse.rootDomainNamingContext).SID.Value } catch { $rootSid = $dSid }
+    $trusted = @{}
+    foreach ($s in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-5-10', 'S-1-3-0', "$dSid-512", "$dSid-516", "$dSid-521", "$rootSid-519", "$rootSid-498") { $trusted[$s] = $true }
+
+    # Obiekt domeny: DCSync i prawa pozwalające przejąć domenę
+    $domSd = (Get-LdapObject -Identity $domainDn -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
+    $domRows = @(Get-DangerousAces $domSd $trusted $domainDn)
+    $syncRe  = '^(MSOL_|AAD_|Sync_|AZUREADSSOACC)'
+    $dcsync  = @($domRows | Where-Object { $_.Prawa -match 'DCSync' } | ForEach-Object {
+        $_ | Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (Azure AD Connect)' } else { '' }) -PassThru })
+    Add-IfAny @{
+        Id = 'D-DCSYNC'; Category = $catPriv
+        Severity = $(if (@($dcsync | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } else { 'High' })
+        Title = 'Podmioty spoza administratorów i DC z prawem replikacji haseł (DCSync)'
+        Objects = $dcsync
+        Description = 'Prawo DS-Replication-Get-Changes-All na obiekcie domeny pozwala pobrać z DC skróty haseł wszystkich kont, w tym krbtgt i administratorów (atak DCSync), bez logowania na DC i bez śladu na stacjach. Kto przejmie takie konto lub członka takiej grupy, przejmuje domenę. Legalnie to prawo ma zwykle tylko konto synchronizacji Entra ID (Azure AD Connect, MSOL_*) - takie konto wymaga ochrony jak administrator domeny.'
+        Recommendation = 'Usunąć prawa replikacji wszystkim podmiotom, które ich nie potrzebują. Konto synchronizacji Entra ID: ograniczyć logowanie, długie losowe hasło, serwer synchronizacji traktować jak DC (Tier 0). Monitorować zdarzenie 4662 z GUID 1131f6ad-... spoza DC.'
+        Fix = (Fx 'dsacls "{DN}" | Select-String -Context 0,3 "Replicating Directory Changes"   # przegląd',
+                  'dsacls "{DN}" /R "<DOMENA>\<podmiot>"   # usuwa wszystkie ACE podmiotu na obiekcie domeny - po weryfikacji').Replace('{DN}', $domainDn)
+        Mitre = 'T1003.006'
+    }
+    Add-IfAny @{
+        Id = 'D-ACL-DOMAIN'; Category = $catPriv; Severity = 'Critical'
+        Title = 'Podmioty spoza administratorów z prawami pozwalającymi przejąć obiekt domeny'
+        Objects = ($domRows | Where-Object { $_.Prawa -notmatch 'DCSync' -or $_.Prawa -match 'GenericAll|WriteDacl|WriteOwner' })
+        Description = 'Pełna kontrola, zmiana uprawnień (WriteDacl), przejęcie własności lub zapis atrybutów obiektu domeny pozwalają nadać sobie DCSync albo zmienić ustawienia całej domeny (np. MachineAccountQuota, gPLink). Typowe źródła: stare instalacje Exchange (grupa Exchange Windows Permissions z WriteDacl - podatność PrivExchange), narzędzia migracyjne, ręczne delegacje sprzed lat.'
+        Recommendation = 'Ustalić pochodzenie każdego wpisu i usunąć zbędne. Dla Exchange: zainstalować aktualną CU i uruchomić Setup /PrepareAD (usuwa WriteDacl z obiektu domeny) albo przejść na model Split Permissions.'
+        Fix = (Fx 'dsacls "{DN}"   # pełna lista uprawnień obiektu domeny',
+                  'dsacls "{DN}" /R "<DOMENA>\<podmiot>"   # po weryfikacji').Replace('{DN}', $domainDn)
+        Mitre = 'T1222.001'
+    }
+
+    # AdminSDHolder: wzorzec uprawnień kopiowany co godzinę na wszystkie konta chronione (adminCount=1)
+    $ash = "CN=AdminSDHolder,CN=System,$domainDn"
+    $ashSd = (Get-LdapObject -Identity $ash -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
+    Add-IfAny @{
+        Id = 'D-ACL-ADMINSDHOLDER'; Category = $catPriv; Severity = 'Critical'
+        Title = 'Niestandardowe uprawnienia zapisu na AdminSDHolder'
+        Objects = @(Get-DangerousAces $ashSd $trusted 'AdminSDHolder')
+        Description = 'Uprawnienia z obiektu AdminSDHolder są co 60 minut kopiowane (SDProp) na wszystkie konta i grupy uprzywilejowane. Wpis dający zapis lub reset hasła na AdminSDHolder daje więc kontrolę nad każdym administratorem domeny i odtwarza się sam po ręcznym usunięciu z konta - to typowy mechanizm utrwalenia dostępu po włamaniu.'
+        Recommendation = 'Usunąć wpisy z AdminSDHolder (nie z pojedynczych kont - zostaną nadpisane). Jeśli wpisu nikt nie potrafi wyjaśnić, potraktować jako możliwy ślad incydentu: sprawdzić, kiedy zmieniono ACL (metadane replikacji atrybutu nTSecurityDescriptor) i kto jest członkiem wskazanego podmiotu.'
+        Fix = (Fx 'dsacls "{DN}"', 'dsacls "{DN}" /R "<DOMENA>\<podmiot>"   # po weryfikacji',
+                  'repadmin /showobjmeta <DC> "{DN}"   # kiedy zmieniono nTSecurityDescriptor').Replace('{DN}', $ash)
+        Mitre = 'T1098'
+    }
+
+    # GPO podpięte do domeny i OU Domain Controllers: obiekt w AD i katalog w SYSVOL
+    $gpoTrusted = $trusted.Clone(); $gpoTrusted["$dSid-520"] = $true   # Group Policy Creator Owners - prawa do własnych GPO
+    $fsBad = [System.Security.AccessControl.FileSystemRights]'WriteData, AppendData, ChangePermissions, TakeOwnership'
+    $gpoDns = @{}
+    foreach ($container in @($domainDn, $domain.DomainControllersContainer)) {
+        $gl = "$((Get-LdapObject -Identity $container -Properties gPLink).gplink)"
+        foreach ($m in [regex]::Matches($gl, '\[LDAP://([^;\]]+);(\d+)\]')) { $gpoDns[$m.Groups[1].Value.ToLower()] = $container }
+    }
+    $gpoRows = foreach ($dn in $gpoDns.Keys) {
+        $g = $null
+        try { $g = Get-LdapObject -Identity $dn -Properties nTSecurityDescriptor, displayName, gPCFileSysPath -SecurityDescriptor } catch { $g = $null }
+        if (-not $g) { continue }
+        $name = "GPO: $($g.displayname) (podpięte do $(if ($gpoDns[$dn] -eq $domainDn) { 'domeny' } else { 'OU Domain Controllers' }))"
+        Get-DangerousAces $g.ntsecuritydescriptor $gpoTrusted "$name - obiekt w AD"
+        if ($g.gpcfilesyspath) {
+            $fsAcl = $null
+            try { $fsAcl = Get-Acl -LiteralPath $g.gpcfilesyspath -ErrorAction Stop } catch { $fsAcl = $null }
+            if ($fsAcl) {
+                foreach ($a in $fsAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+                    if ($a.AccessControlType -ne 'Allow' -or ($a.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+                    $sid = $a.IdentityReference.Value
+                    if ($gpoTrusted.ContainsKey($sid) -or -not ($a.FileSystemRights -band $fsBad)) { continue }
+                    [pscustomobject]@{ Obiekt = "$name - katalog SYSVOL"; Podmiot = (Resolve-SidName $sid); Prawa = "$($a.FileSystemRights)"; Dziedziczone = $a.IsInherited; SID = $sid }
+                }
+            }
+        }
+    }
+    Add-IfAny @{
+        Id = 'D-ACL-GPO'; Category = $catPriv; Severity = 'High'
+        Title = 'GPO kontrolerów domeny lub całej domeny modyfikowalne przez podmioty spoza administratorów'
+        Objects = $gpoRows
+        Description = 'GPO podpięte do domeny lub OU Domain Controllers działają na kontrolerach domeny. Kto może zmienić takie GPO (obiekt w AD albo pliki w SYSVOL), może uruchomić dowolny kod z uprawnieniami SYSTEM na DC - np. przez zadanie zaplanowane lub skrypt startowy - i przejąć domenę.'
+        Recommendation = 'Prawo edycji GPO poziomu domeny i DC zostawić tylko Domain Admins / Enterprise Admins. Delegacje edycji GPO dla helpdesku ograniczyć do GPO stacji roboczych.'
+        Fix = (Fx 'Get-GPPermission -Name "<GPO>" -All   # moduł GroupPolicy',
+                  'Set-GPPermission -Name "<GPO>" -TargetName "<podmiot>" -TargetType Group -PermissionLevel GpoRead -Replace',
+                  'icacls "\\{DOMENA}\SYSVOL\{DOMENA}\Policies\{<GUID>}"   # uprawnienia katalogu')
+        Mitre = 'T1484.001'
     }
 }
 #endregion
@@ -3249,7 +3395,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) - nie jest to pełna ocena zgodności z CIS. ')
-[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, analizy uprawnień (ACL) na obiektach AD i GPO, usług certyfikatów (ADCS) ani stacji końcowych. ')
+[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder i GPO domeny/DC - usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe i wymagają weryfikacji oraz zgłoszenia zmiany przed wykonaniem.')

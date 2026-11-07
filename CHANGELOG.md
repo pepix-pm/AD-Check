@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20 – 2026-11-07
+
+Nowe testy uprawnień (ACL), zwykłe konto, tylko odczyt:
+- **D-DCSYNC** – prawo DS-Replication-Get-Changes-All (lub wszystkie prawa rozszerzone) na obiekcie domeny dla podmiotów spoza DC i administratorów; konto synchronizacji Entra ID oznaczane w kolumnie Uwagi.
+- **D-ACL-DOMAIN** – GenericAll, WriteDacl, WriteOwner, zapis wszystkich atrybutów lub gPLink na obiekcie domeny (np. Exchange Windows Permissions).
+- **D-ACL-ADMINSDHOLDER** – niestandardowe prawa zapisu / resetu hasła na AdminSDHolder.
+- **D-ACL-GPO** – GPO podpięte do domeny i OU Domain Controllers modyfikowalne przez nie-adminów (obiekt w AD i katalog w SYSVOL).
+
 ## 0.19 – 2026-11-07
 
 Poprawki po pierwszym przebiegu 0.18 w środowisku produkcyjnym:

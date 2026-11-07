@@ -112,6 +112,10 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 
 | ID | Waga | Test | MITRE ATT&CK |
 |---|---|---|---|
+| D-DCSYNC | Critical / High | Prawo replikacji haseł (DCSync) dla podmiotów spoza DC i administratorów (High, gdy tylko konto synchronizacji Entra ID) | T1003.006 |
+| D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
+| D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
+| D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
 | P-KRBTGT | High / Critical | Wiek hasła krbtgt (> 180 / > 365 dni) | T1558.001 |
 | P-PNE | High | Konta uprzywilejowane z hasłem bez wygasania | T1078.002 |
 | P-SPN | High | Konta uprzywilejowane z SPN | T1558.003 |
