@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory
+    AD-Check — przegląd bezpieczeństwa Active Directory
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta. Nie wymaga RSAT: AD odczytywane przez LDAP (System.DirectoryServices).
@@ -16,10 +16,10 @@
     wynik ogólny = najgorszy obszar, poziom dojrzałości 1-5; im mniej punktów, tym lepiej.
 
 .EXAMPLE
-    .\PEPIX-ADCheck.ps1 -Klient KLIENT
-    .\PEPIX-ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
-    .\PEPIX-ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
-    .\PEPIX-ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
+    .\ADCheck.ps1 -Klient KLIENT
+    .\ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
+    .\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
+    .\ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
     # bez kopiowania pliku na serwer (z prywatnego repo GitHub) - patrz README, sekcja "Uruchomienie z GitHuba"
 #>
 [CmdletBinding()]
