@@ -2123,13 +2123,14 @@ Invoke-Check 'LAPS-ACL' {
 
     # Weryfikacja wprost: czy konto, którym wykonano przegląd, widzi hasła. Filtr LDAP na atrybucie poufnym
     # zwraca tylko obiekty, których atrybut konto może odczytać - wartości haseł nie są pobierane.
-    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    # Tożsamość z LDAP (Who am I), nie z procesu - przy runas /netonly lokalny token to inne konto
+    $meName = $(if ($ldapIdentity) { $ldapIdentity } else { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name })
     $clear = @('ms-Mcs-AdmPwd', 'msLAPS-Password' | Where-Object { $lapsSchema.ContainsKey($_) })
-    if ($clear.Count -and $me.User.AccountDomainSid -and $me.User.AccountDomainSid.Value -eq $dSid -and -not $privSids[$me.User.Value]) {
+    if ($clear.Count -and $runAsSid -and $runAsSid.StartsWith("$dSid-") -and -not $runAsPriv) {
         $flt = '(|' + (($clear | ForEach-Object { "($_=*)" }) -join '') + ')'
         Add-IfAny @{
             Id = 'C-LAPS-READABLE'; Category = $catComp; Severity = 'High'
-            Title = "Konto użyte do przeglądu ($($me.Name)) odczytuje hasła LAPS"
+            Title = "Konto użyte do przeglądu ($meName) odczytuje hasła LAPS"
             Objects = (Find-Ldap -Filter "(&(objectCategory=computer)$flt)" -Properties operatingSystem | ForEach-Object { ConvertTo-ComputerRow $_ })
             Description = 'Konto spoza grup uprzywilejowanych, którym uruchomiono przegląd, ma dostęp do jawnych haseł lokalnego administratora tych komputerów. Wartości haseł nie zostały pobrane ani zapisane w raporcie.'
             Recommendation = 'Ustalić, skąd pochodzi dostęp (patrz C-LAPS-READERS / C-LAPS-READ-BROAD) i czy jest uzasadniony dla tego konta.'
@@ -3538,7 +3539,7 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
     $st = if ($f) { 'Znalezisko' }
           elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
-          elseif ($r.Id -eq 'DC-NETSESSION' -and $runAsPriv) { 'Pominięty (konto uprzywilejowane)' }
+          elseif ($runAsPriv -and $r.Id -in @('DC-NETSESSION', 'C-LAPS-READABLE')) { 'Pominięty (konto uprzywilejowane)' }
           elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
           elseif ($r.N -and ($foundIds -contains $r.N)) { 'Nie dotyczy' }
           else { 'Zaliczony' }
