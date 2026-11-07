@@ -185,6 +185,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | DC-CIS-REG | wg najgorszego ustawienia | Opcje zabezpieczeń i szablony administracyjne DC niezgodne z CIS L1 (42 ustawienia) | – |
 | DC-CIS-AUDIT | wg najgorszego ustawienia | Zaawansowane zasady audytu DC niezgodne z CIS L1 (24 podkategorie) | T1562.002 |
 | DC-CIS-RIGHTS | wg najgorszego ustawienia | Przypisanie praw użytkowników na DC niezgodne z CIS L1 (16 praw) | T1078.002 |
+| DC-MSBASE | wg najgorszego ustawienia | Ustawienia DC niezgodne z Microsoft Security Baseline (Windows Server 2025, profil DC), których nie zgłosił już CIS ani inny test | – |
 | DC-CIS-SUMMARY | Info | Procent zgodności i pełna lista sprawdzonych ustawień | – |
 | DC-REPL-TSL | Critical | Replikacja nieudana dłużej niż tombstone lifetime | – |
 | D-FSMO | Critical | Role FSMO przypisane do nieistniejącego DC | – |

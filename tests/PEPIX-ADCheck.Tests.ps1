@@ -4,7 +4,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors
-    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar'
+    $names = 'Read-RegistryPol', 'Test-CisValue', 'ConvertFrom-AuditText', 'Get-TopSeverity', 'Show-Val', 'Get-ParentOU', 'Format-Date', 'Format-EncTypes', 'Get-ScoreClass', 'ConvertFrom-LdapResult', 'ConvertTo-LdapFilterValue', 'ConvertFrom-DnToDns', 'ConvertFrom-LdapTime', 'Get-OsLifecycle', 'Test-IpInSubnet', 'Get-DsHeuristicsChar', 'Test-MsSpec', 'Format-MsSpec'
     $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
     foreach ($d in $defs) { if ($d.Name -in $names) { . ([scriptblock]::Create($d.Extent.Text)) } }
     # Tabele cyklu życia Windows (zmienne skryptu) potrzebne Get-OsLifecycle
@@ -201,5 +201,26 @@ Describe 'Get-DsHeuristicsChar' {
         Get-DsHeuristicsChar $v 28 | Should -Be '0'
         Get-DsHeuristicsChar $v 29 | Should -Be '1'
         Get-DsHeuristicsChar $v 30 | Should -Be '1'
+    }
+}
+
+Describe 'Test-MsSpec' {
+    It '<Spec> dla <Value> (domyślnie <Default>) = <Wynik>' -ForEach @(
+        @{ Value = 1;    Default = $null; Spec = 'eq:1';        Wynik = $true }
+        @{ Value = $null; Default = 1;    Spec = 'eq:1';        Wynik = $true }
+        @{ Value = $null; Default = $null; Spec = 'eq:1';       Wynik = $false }
+        @{ Value = $null; Default = $null; Spec = 'eqn:0';      Wynik = $true }
+        @{ Value = 1;    Default = $null; Spec = 'eqn:0';       Wynik = $false }
+        @{ Value = 200000; Default = $null; Spec = 'ge:196608'; Wynik = $true }
+        @{ Value = 1000; Default = $null; Spec = 'range:1-900'; Wynik = $false }
+        @{ Value = 0;    Default = $null; Spec = 'range:1-900'; Wynik = $false }
+        @{ Value = 2147483640; Default = $null; Spec = 'in:2147483624,2147483632,2147483640'; Wynik = $true }
+        @{ Value = 28;   Default = $null; Spec = 'in:2147483624,2147483632,2147483640'; Wynik = $false }
+    ) {
+        Test-MsSpec $Value $Default $Spec | Should -Be $Wynik
+    }
+    It 'Format-MsSpec' {
+        Format-MsSpec 'ge:196608' | Should -Be '≥ 196608'
+        Format-MsSpec '' | Should -Be '— (brak w baseline)'
     }
 }

@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.20'
+$Version = '0.21'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -508,6 +508,7 @@ $ruleCatalog = @(
     @{ Id = 'DC-LDAPCBT';        O = 'A'; M = 'Przechwytywanie i relay';      C = 'DC-PROBE';     W = 'DC'; T = 'LDAP channel binding niewymuszony' }
     @{ Id = 'DC-CIS-AUDIT';      O = 'A'; M = 'Audyt';                        C = 'CIS';          W = 'DC'; T = 'Zasady audytu DC (CIS L1)' }
     @{ Id = 'DC-CIS-REG';        O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia zabezpieczeń DC (CIS L1)' }
+    @{ Id = 'DC-MSBASE';         O = 'A'; M = 'Utwardzenie DC';               C = 'CIS';          W = 'DC'; T = 'Ustawienia DC wg Microsoft Security Baseline' }
     @{ Id = 'D-BACKUP';          O = 'A'; M = 'Kopia i odtwarzanie';          C = 'BACKUP';       T = 'Brak aktualnej kopii AD' }
     @{ Id = 'D-RECYCLE';         O = 'A'; M = 'Kopia i odtwarzanie';          C = 'DOMAIN';       T = 'Kosz AD wyłączony' }
     @{ Id = 'D-FFL';             O = 'S'; M = 'Przestarzałe systemy';         C = 'DOMAIN';       T = 'Poziom funkcjonalny lasu < 2016' }
@@ -687,6 +688,7 @@ $planMeta = @{
     'D-ACL-DOMAIN'     = @(2, 8, 1, 'Exchange: aktualna CU i Setup /PrepareAD')
     'D-ACL-ADMINSDHOLDER' = @(1, 4, 1, 'Niewyjaśniony wpis traktować jak możliwy incydent')
     'D-ACL-GPO'        = @(1, 4, 1, 'Przegląd delegacji GPO z klientem')
+    'DC-MSBASE'        = @(4, 12, 2, 'Import baseline z Security Compliance Toolkit do GPO testowego, porównanie w Policy Analyzer')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
 $planStages = @{
@@ -699,6 +701,40 @@ function Format-Hours($H) { if ($null -eq $H) { '?' } else { ([double]$H).ToStri
 $ruleMeta = @{}
 foreach ($r in $ruleCatalog) { $ruleMeta[$r.Id] = $r }
 $sevLevel = @{ Critical = 1; High = 2; Medium = 3; Low = 4; Info = 5 }
+
+# Odpowiadające rekomendacje Microsoft Defender for Identity (ocena stanu zabezpieczeń tożsamości, Microsoft Secure Score).
+# Tytuły wg Microsoft Learn (defender-for-identity/security-posture-assessments, stan 2026-11); strona: acc|inf|gp|hy.
+$mdiBase  = 'https://learn.microsoft.com/defender-for-identity/security-posture-assessments/'
+$mdiPages = @{ acc = 'accounts'; inf = 'identity-infrastructure'; gp = 'group-policy'; hy = 'hybrid-security' }
+$mdiMap = @{
+    'U-STALE' = 'acc|Remove stale Active Directory accounts'; 'C-STALE' = 'acc|Remove stale Active Directory accounts'
+    'P-AccountOperators' = 'acc|Locate accounts in built-in Operator Groups'; 'P-ServerOperators' = 'acc|Locate accounts in built-in Operator Groups'
+    'P-PrintOperators' = 'acc|Locate accounts in built-in Operator Groups'; 'P-BackupOperators' = 'acc|Locate accounts in built-in Operator Groups'
+    'U-ADMINCOUNT' = 'acc|Remove access rights on suspicious accounts with the Admin SDHolder permission'
+    'D-ACL-ADMINSDHOLDER' = 'acc|Remove access rights on suspicious accounts with the Admin SDHolder permission'
+    'P-KRBTGT' = 'acc|Change password for krbtgt account'; 'P-ADM500' = 'acc|Change password of built-in domain Administrator account'
+    'P-STALE' = 'acc|Dormant entities in sensitive groups'
+    'D-DCSYNC' = 'acc|Remove non-admin accounts with DCSync permissions;hy|Remove unnecessary replication permissions for Microsoft Entra Connect AD DS Connector account'
+    'P-DELEG' = 'acc|Ensure privileged accounts are not delegated'
+    'C-LAPS-NONE' = 'acc|Microsoft LAPS usage'; 'C-LAPS-MISSING' = 'acc|Microsoft LAPS usage'
+    'U-UNCONSTR' = 'acc|Unsecure Kerberos delegation'; 'C-UNCONSTR' = 'acc|Unsecure Kerberos delegation'
+    'U-SIDHIST' = 'acc|Unsecure SID History attributes'
+    'U-ASREP' = 'acc|Unsecure account attributes'; 'U-REVERSIBLE' = 'acc|Unsecure account attributes'; 'U-PWDNOTREQ' = 'acc|Unsecure account attributes'
+    'U-DES' = 'acc|Unsecure account attributes'; 'D-KRB-NOAES' = 'acc|Unsecure account attributes'; 'P-SPN' = 'acc|Unsecure account attributes'
+    'U-GUEST' = 'inf|Built-in Active Directory Guest account is enabled'
+    'DC-MACHINEPWD' = 'inf|Change Domain Controller computer account old password'
+    'DC-SPOOLER' = 'inf|Disable Print spooler service on domain controllers'
+    'DC-LDAPSIGN' = 'inf|Resolve unsecure domain configurations'; 'DC-NTLMV1' = 'inf|Resolve unsecure domain configurations'
+    'D-ACL-GPO' = 'gp|GPO can be modified by unprivileged accounts'
+}
+# Tekst rekomendacji MDI dla ID; $Html - z linkami
+function Get-MdiRef([string]$Id, [switch]$Html) {
+    if (-not $mdiMap.ContainsKey($Id)) { return '' }
+    (@($mdiMap[$Id] -split ';' | ForEach-Object {
+        $pg, $t = $_ -split '\|', 2
+        if ($Html) { "<a href=`"$mdiBase$($mdiPages[$pg])`" target=`"_blank`">$(HtmlEnc $t)</a>" } else { $t }
+    })) -join $(if ($Html) { '; ' } else { '; ' })
+}
 
 function Add-Finding([hashtable]$F) {
     $obj  = @($F.Objects | Where-Object { $_ })
@@ -718,6 +754,7 @@ function Add-Finding([hashtable]$F) {
         Poziom         = $sevLevel[$F.Severity]
         NIS2           = ''
         ISO27001       = ''
+        MDI            = (Get-MdiRef $F.Id)
         Objects        = $obj
     }
     if ($F.Severity -ne 'Info' -and $complianceMap.ContainsKey($row.Model)) {
@@ -994,6 +1031,34 @@ function Get-LinkedGpoRegistry {
 # Znaki dSHeuristics (numeracja od 1, jak w dokumentacji MS-ADTS); brak znaku = wartość domyślna '0'
 function Get-DsHeuristicsChar([string]$Value, [int]$Position) {
     if ($Value.Length -ge $Position) { "$($Value[$Position - 1])" } else { '0' }
+}
+
+# Specyfikacja wartości Microsoft Security Baseline: eq:N | eqn:N (N lub nieustawione) | ge:N | range:A-B | in:a,b
+# $null = nieustawione -> wartość domyślna $Default (dla eqn nieustawione zawsze zgodne)
+function Test-MsSpec($Value, $Default, [string]$Spec) {
+    $kind, $arg = $Spec -split ':', 2
+    if ($null -eq $Value -and $kind -eq 'eqn') { return $true }
+    $v = $Value; if ($null -eq $v) { $v = $Default }
+    if ($null -eq $v) { return $false }
+    try { $n = [int64]$v } catch { return $false }
+    switch ($kind) {
+        { $_ -in 'eq', 'eqn' } { return ($n -eq [int64]$arg) }
+        'ge'    { return ($n -ge [int64]$arg) }
+        'range' { $lo, $hi = $arg -split '-'; return ($n -ge [int64]$lo -and $n -le [int64]$hi) }
+        'in'    { return (@($arg -split ',' | ForEach-Object { [int64]$_ }) -contains $n) }
+    }
+    $false
+}
+function Format-MsSpec([string]$Spec) {
+    if (-not $Spec) { return '— (brak w baseline)' }
+    $kind, $arg = $Spec -split ':', 2
+    switch ($kind) {
+        'eq'    { "$arg" }
+        'eqn'   { "$arg (lub nieustawione)" }
+        'ge'    { "≥ $arg" }
+        'range' { "$($arg -replace '-', '-')" }
+        'in'    { 'jedna z: ' + ($arg -replace ',', ', ') }
+    }
 }
 
 # Ocena wartości kontroli CIS; $null = nieustawione -> wartość domyślna systemu (D), brak domyślnej = niezgodne
@@ -2338,6 +2403,45 @@ if (-not $SkipDCChecks) {
         @{ A = 'AT'; N = 'Turn off Autoplay (wszystkie napędy)'; P = 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'; V = 'NoDriveTypeAutoRun'; Op = 'eq'; E = 255; D = $null; Ex = 'All drives (255)'; S = 'Low' }
     )
     # E: 1 = Success, 2 = Failure, 3 = oba; G = początek GUID podkategorii (reszta: -69ae-11d9-bed3-505054503030)
+    # ---- Microsoft Security Baseline (Windows Server 2025, profil Domain Controller; Microsoft Learn, stan 2026-01) ----
+    # Specyfikacja: eq:N | eqn:N (N lub nieustawione) | ge:N | range:A-B | in:a,b. Brak klucza = ustawienia nie ma w baseline.
+    $msBaseline = @{
+        "$lsa|LimitBlankPasswordUse" = 'eqn:1'; "$lsa|RestrictAnonymousSAM" = 'eqn:1'; "$lsa|RestrictAnonymous" = 'eq:1'
+        "$lsa|EveryoneIncludesAnonymous" = 'eqn:0'; "$lsa|SCENoApplyLegacyAuditPolicy" = 'eq:1'
+        'System\CurrentControlSet\Services\LanManServer\Parameters|RestrictNullSessAccess' = 'eqn:1'
+        'System\CurrentControlSet\Services\LanManServer\Parameters|RequireSecuritySignature' = 'eq:1'
+        'System\CurrentControlSet\Services\LanmanWorkstation\Parameters|RequireSecuritySignature' = 'eq:1'
+        "$msv|NTLMMinClientSec" = 'eq:537395200'; "$msv|NTLMMinServerSec" = 'eq:537395200'; "$msv|allownullsessionfallback" = 'eqn:0'
+        'System\CurrentControlSet\Services\LDAP|LDAPClientIntegrity' = 'range:1-2'
+        "$polSys\Kerberos\Parameters|SupportedEncryptionTypes" = 'in:2147483624,2147483632,2147483640'
+        "$nl|RequireSignOrSeal" = 'eq:1'; "$nl|RequireStrongKey" = 'eq:1'; "$nl|RefusePasswordChange" = 'eq:0'
+        "$polSys|InactivityTimeoutSecs" = 'range:1-900'; "$polSys|FilterAdministratorToken" = 'eq:1'; "$polSys|EnableLUA" = 'eq:1'
+        "$lsa|RunAsPPL" = 'range:1-2'
+        'Software\Policies\Microsoft\Windows NT\DNSClient|EnableMulticast' = 'eq:0'
+        'System\CurrentControlSet\Services\NetBT\Parameters|NodeType' = 'eq:2'
+        'Software\Policies\Microsoft\Windows\LanmanWorkstation|AllowInsecureGuestAuth' = 'eq:0'
+        "$polSys\CredSSP\Parameters|AllowEncryptionOracle" = 'eq:0'
+        "$ts|UserAuthentication" = 'eq:1'; "$ts|DisablePasswordSaving" = 'eq:1'
+        "$winrm\Service|AllowBasic" = 'eq:0'; "$winrm\Service|AllowUnencryptedTraffic" = 'eq:0'
+        "$winrm\Client|AllowBasic" = 'eqn:0'; "$winrm\Client|AllowUnencryptedTraffic" = 'eqn:0'
+        'Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging|EnableScriptBlockLogging' = 'eq:1'
+        "$polSys\Audit|ProcessCreationIncludeCmdLine_Enabled" = 'eq:1'
+        "$evl\Security|MaxSize" = 'ge:196608'; "$evl\Application|MaxSize" = 'ge:32768'; "$evl\System|MaxSize" = 'ge:32768'
+        'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer|NoDriveTypeAutoRun' = 'eq:255'
+    }
+    # Ustawienia z baseline Microsoft spoza wybranych kontroli CIS. X = ID testu, który już ocenia ustawienie (bez podwójnego zgłoszenia).
+    $msOnly = @(
+        @{ A = 'AT'; N = 'Allow Custom SSPs and APs to be loaded into LSASS'; P = 'Software\Policies\Microsoft\Windows\System'; V = 'AllowCustomSSPsAPs'; D = $null; MS = 'eq:0'; S = 'Medium' }
+        @{ A = 'SO'; N = 'Network security: Allow Local System to use computer identity for NTLM'; P = $lsa; V = 'UseMachineId'; D = $null; MS = 'eq:1'; S = 'Low' }
+        @{ A = 'SO'; N = 'User Account Control: Allow UIAccess applications to prompt for elevation without using the secure desktop'; P = $polSys; V = 'EnableUIADesktopToggle'; D = 0; MS = 'eq:0'; S = 'Low' }
+        @{ A = 'SO'; N = 'Microsoft network server: Amount of idle time required before suspending session'; P = 'System\CurrentControlSet\Services\LanManServer\Parameters'; V = 'AutoDisconnect'; D = 15; MS = 'range:1-15'; S = 'Low' }
+        @{ A = 'AT'; N = 'Windows Installer: Allow user control over installs'; P = 'Software\Policies\Microsoft\Windows\Installer'; V = 'EnableUserControl'; D = $null; MS = 'eqn:0'; S = 'Low' }
+        @{ A = 'SO'; N = 'Network security: LAN Manager authentication level'; P = $lsa; V = 'LmCompatibilityLevel'; D = 3; MS = 'eq:5'; S = 'Medium'; X = 'DC-NTLMV1' }
+        @{ A = 'SO'; N = 'Domain controller: LDAP server channel binding token requirements'; P = 'System\CurrentControlSet\Services\NTDS\Parameters'; V = 'LdapEnforceChannelBinding'; D = 0; MS = 'eq:2'; S = 'Medium'; X = 'DC-LDAPCBT' }
+    )
+    # Audyt: Microsoft wymaga tych samych bitów co CIS, poza Kerberos Service Ticket Operations (tylko Niepowodzenie)
+    $msAuditOverride = @{ 'Account Logon: Kerberos Service Ticket Operations' = 2 }
+
     $cisAudit = @(
         @{ G = '0cce923f'; N = 'Account Logon: Credential Validation'; E = 3; S = 'Medium' }
         @{ G = '0cce9242'; N = 'Account Logon: Kerberos Authentication Service'; E = 3; S = 'Medium' }
@@ -2393,7 +2497,7 @@ if (-not $SkipDCChecks) {
         # Cele oceny: przy -UseWinRM każdy DC osobno (rejestr + auditpol), inaczej jeden zestaw z GPO dla wszystkich DC
         $targets = [System.Collections.Generic.List[object]]::new()
         if ($UseWinRM) {
-            $paths = [string[]]@($cisReg | ForEach-Object { "$($_.P)|$($_.V)" })
+            $paths = [string[]]@(@($cisReg) + @($msOnly) | ForEach-Object { "$($_.P)|$($_.V)" })
             foreach ($dc in $dcs) {
                 try {
                     $r = Invoke-Command -ComputerName $dc.HostName -ErrorAction Stop -ArgumentList (, $paths) -ScriptBlock {
@@ -2426,15 +2530,35 @@ if (-not $SkipDCChecks) {
                     $val = if ($g) { $g.Wartosc } else { $null }
                     $src = if ($g) { $g.Zrodlo } else { 'brak w GPO - wartość domyślna systemu' }
                 }
+                $ms = $msBaseline["$($c.P)|$($c.V)"]
                 $row = [pscustomobject]@{
                     Ustawienie = $c.N; DC = $t.DC; Obszar = $(if ($c.A -eq 'SO') { 'Opcje zabezpieczeń' } else { 'Szablony administracyjne' })
                     Oczekiwane = $c.Ex; Aktualne = $(if ($null -ne $val) { "$val" } elseif ($null -ne $c.D) { "nieustawione (domyślnie $($c.D))" } else { 'nieustawione' })
                     Zrodlo = $src; Waga = $c.S; Zgodne = $(if (Test-CisValue $val $c) { 'Tak' } else { 'Nie' })
+                    Microsoft = (Format-MsSpec $ms); ZgodneMS = $(if (-not $ms) { '—' } elseif (Test-MsSpec $val $c.D $ms) { 'Tak' } else { 'Nie' })
                 }
                 $cisRows.Add($row)
             }
+            foreach ($c in $msOnly) {
+                if ($t.Tryb -eq 'WinRM') {
+                    $val = $t.Reg["$($c.P)|$($c.V)"]
+                    $src = if ($null -ne $val) { 'rejestr DC (WinRM)' } else { 'nieustawione - wartość domyślna systemu' }
+                } else {
+                    $g = $gpo.Registry["$($c.P)\$($c.V)".ToLower()]
+                    $val = if ($g) { $g.Wartosc } else { $null }
+                    $src = if ($g) { $g.Zrodlo } else { 'brak w GPO - wartość domyślna systemu' }
+                }
+                $cisRows.Add([pscustomobject]@{
+                    Ustawienie = $c.N; DC = $t.DC; Obszar = $(if ($c.A -eq 'SO') { 'Opcje zabezpieczeń' } else { 'Szablony administracyjne' })
+                    Oczekiwane = '— (poza wybranymi kontrolami CIS)'; Aktualne = $(if ($null -ne $val) { "$val" } elseif ($null -ne $c.D) { "nieustawione (domyślnie $($c.D))" } else { 'nieustawione' })
+                    Zrodlo = $src; Waga = $c.S; Zgodne = 'poza CIS'
+                    Microsoft = (Format-MsSpec $c.MS); ZgodneMS = $(if (Test-MsSpec $val $c.D $c.MS) { 'Tak' } else { 'Nie' })
+                    InnyTest = $c.X
+                })
+            }
             foreach ($a in $cisAudit) {
                 $guid = "$($a.G)-69ae-11d9-bed3-505054503030"
+                $msE  = if ($msAuditOverride.ContainsKey($a.N)) { $msAuditOverride[$a.N] } else { $a.E }
                 if ($t.Tryb -eq 'WinRM') {
                     $line = $t.Audit | Where-Object { "$($_.G)".Trim('{', '}').ToLower() -eq $guid } | Select-Object -First 1
                     $val = if ($line) { ConvertFrom-AuditText $line.S } else { $null }
@@ -2448,6 +2572,8 @@ if (-not $SkipDCChecks) {
                     Ustawienie = $a.N; DC = $t.DC; Obszar = 'Zasady audytu'
                     Oczekiwane = $auditTxt[$a.E]; Aktualne = $(if ($null -ne $val) { $auditTxt[[int]$val] } else { 'nieustawione' })
                     Zrodlo = $src; Waga = $a.S; Zgodne = $(if ($null -ne $val -and (([int]$val -band $a.E) -eq $a.E)) { 'Tak' } else { 'Nie' })
+                    Microsoft = $(if ($msAuditOverride.ContainsKey($a.N)) { $auditTxt[$msAuditOverride[$a.N]] } else { $auditTxt[$a.E] })
+                    ZgodneMS = $(if ($null -ne $val -and (([int]$val -band $msE) -eq $msE)) { 'Tak' } else { 'Nie' })
                 }
                 $cisRows.Add($row)
             }
@@ -2474,6 +2600,7 @@ if (-not $SkipDCChecks) {
             $row = [pscustomobject]@{
                 Ustawienie = "$($c.N) ($($c.R))"; DC = 'wszystkie DC (GPO)'; Obszar = 'Przypisanie praw użytkowników'
                 Oczekiwane = $exp; Aktualne = $cur; Zrodlo = $src; Waga = $c.S; Zgodne = $ok
+                Microsoft = '— (nie porównywano)'; ZgodneMS = '—'
             }
             $cisRows.Add($row)
         }
@@ -2510,14 +2637,30 @@ if (-not $SkipDCChecks) {
             Fix = (Fx '# GPMC > Default Domain Controllers Policy (lub dedykowane GPO) > Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > User Rights Assignment')
             Mitre = 'T1078.002'
         }
+        # Luki tylko wg Microsoft (CIS zgodne lub poza CIS), bez ustawień ocenianych przez inne testy - bez podwójnego liczenia
+        $msGap = @($cisRows | Where-Object { $_.ZgodneMS -eq 'Nie' -and $_.Zgodne -ne 'Nie' -and -not $_.InnyTest })
+        Add-IfAny @{
+            Id = 'DC-MSBASE'; Category = $catCis; Severity = (Get-TopSeverity $msGap)
+            Title = 'Ustawienia DC niezgodne z Microsoft Security Baseline (poza lukami CIS)'
+            Objects = ($msGap | Select-Object Ustawienie, DC, Obszar, Microsoft, Aktualne, Zrodlo, Waga, Zgodne)
+            Description = "Ustawienia, w których konfiguracja kontrolerów domeny odbiega od zaleceń Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller), a nie zostały już zgłoszone jako niezgodność z CIS. Kolumna Zgodne pokazuje wynik wg CIS ('poza CIS' = ustawienia nie ma w wybranych kontrolach CIS). Microsoft i CIS różnią się w kilku miejscach - np. Microsoft blokuje ładowanie własnych SSP do LSASS, a nie wymaga zakazu przechowywania poświadczeń sieciowych. $gpoNote"
+            Recommendation = 'Wdrożyć brakujące ustawienia w GPO dla OU Domain Controllers. Najprościej zaimportować GPO z Microsoft Security Compliance Toolkit (baseline dla wersji systemu DC) do testowego GPO i porównać narzędziem Policy Analyzer z obecną konfiguracją.'
+            Fix = (Fx '# Security Compliance Toolkit: https://www.microsoft.com/download/details.aspx?id=55319',
+                      '# Policy Analyzer: porównanie baseline z GPO domeny (eksport: Backup-GPO -All -Path C:\Temp\GPO)',
+                      'gpresult /h C:\Temp\dc-gpo.html   # na DC: zastosowane ustawienia')
+        }
+
         $evaluated = @($cisRows | Where-Object { $_.Zgodne -in 'Tak', 'Nie' })
         $okCount   = @($evaluated | Where-Object Zgodne -eq 'Tak').Count
         $pct       = if ($evaluated.Count) { [int](100 * $okCount / $evaluated.Count) } else { 0 }
+        $msEval    = @($cisRows | Where-Object { $_.ZgodneMS -in 'Tak', 'Nie' })
+        $msOk      = @($msEval | Where-Object ZgodneMS -eq 'Tak').Count
+        $msPct     = if ($msEval.Count) { [int](100 * $msOk / $msEval.Count) } else { 0 }
         Add-Finding @{
             Id = 'DC-CIS-SUMMARY'; Category = $catCis; Severity = 'Info'
-            Title = "Zgodność DC z wybranymi kontrolami CIS L1: $okCount z $($evaluated.Count) ($pct%)$(if ($cisRows.Count -gt $evaluated.Count) { "; nie oceniono: $($cisRows.Count - $evaluated.Count)" })"
+            Title = "Zgodność DC: CIS L1 $okCount z $($evaluated.Count) ($pct%), Microsoft Security Baseline $msOk z $($msEval.Count) ($msPct%)$(if ($cisRows.Count -gt $evaluated.Count) { "; poza oceną CIS: $($cisRows.Count - $evaluated.Count)" })"
             Objects = $cisRows
-            Description = "Pełna lista sprawdzonych ustawień ze statusem. Kontrole wybrane na podstawie CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); nie jest to pełna ocena zgodności z CIS. $gpoNote"
+            Description = "Pełna lista sprawdzonych ustawień ze statusem wg dwóch wzorców: kolumny Oczekiwane/Zgodne - wybrane kontrole CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); kolumny Microsoft/ZgodneMS - Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller, wg Microsoft Learn, stan 2026-01). Nie jest to pełna ocena zgodności z żadnym z nich; przypisanie praw użytkowników porównano tylko z CIS. $gpoNote"
         }
     }
 }
@@ -3121,7 +3264,7 @@ $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DN
                                   AktualizacjeDC = @($invPatch | Select-Object -Property * -ExcludeProperty Build, Ubr, Boot, Pending) } } |
     ConvertTo-Json -Depth 6 | Set-Content "$base.json" -Encoding $encOut
 
-$sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, Category, Severity, Title, Count, Recommendation, Mitre |
+$sorted | Select-Object Id, Obszar, Model, Poziom, NIS2, ISO27001, MDI, Category, Severity, Title, Count, Recommendation, Mitre |
     Export-Csv "$base.csv" -NoTypeInformation -Encoding $encOut -Delimiter ';'
 
 $objRows = foreach ($f in $sorted) {
@@ -3360,6 +3503,7 @@ foreach ($f in $sorted) {
         $iso = (($f.ISO27001 -split ',\s*') | Where-Object { $_ } | ForEach-Object { "A.$_" }) -join ', '
         [void]$sb.Append("<div class=`"meta`">NIS2 art. 21 ust. 2 / UKSC: lit. $(HtmlEnc $f.NIS2) &nbsp;|&nbsp; ISO/IEC 27001:2022: $(HtmlEnc $iso)</div>")
     }
+    if ($f.MDI) { [void]$sb.Append("<div class=`"meta`">Microsoft Defender for Identity: $(Get-MdiRef $f.Id -Html)</div>") }
     if ($f.Description)    { [void]$sb.Append("<div class=`"lbl`">Ryzyko</div><div>$(HtmlEnc $f.Description)</div>") }
     if ($f.Recommendation) { [void]$sb.Append("<div class=`"lbl`">Zalecenie</div><div>$(HtmlEnc $f.Recommendation)</div>") }
     if ($f.Fix)            { [void]$sb.Append("<div class=`"lbl`">Przykładowa naprawa (do weryfikacji przed wykonaniem)</div><pre>$(HtmlEnc $f.Fix)</pre>") }
@@ -3394,7 +3538,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
 [void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
-[void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) - nie jest to pełna ocena zgodności z CIS. ')
+[void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder i GPO domeny/DC - usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21 – 2026-11-07
+
+- Porównanie konfiguracji DC także z **Microsoft Security Baseline** dla Windows Server 2025 (profil Domain Controller; wartości wg Microsoft Learn, stan 2026-01): kolumny Microsoft i ZgodneMS w tabelach CIS, 7 dodatkowych ustawień spoza wybranych kontroli CIS (m.in. AllowCustomSSPsAPs, UseMachineId, AutoDisconnect).
+- **DC-MSBASE** – tylko luki wg Microsoft, których nie zgłosił CIS ani inny test (bez podwójnego liczenia punktów).
+- DC-CIS-SUMMARY: w tytule odsetek zgodności wg CIS i wg Microsoft.
+- Przy znaleziskach odniesienie do odpowiadającej rekomendacji **Microsoft Defender for Identity** (ocena stanu zabezpieczeń tożsamości) z linkiem do Microsoft Learn; pole MDI w CSV/JSON.
+
 ## 0.20 – 2026-11-07
 
 Nowe testy uprawnień (ACL), zwykłe konto, tylko odczyt:
