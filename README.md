@@ -273,7 +273,16 @@ Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microso
 
 ## Licencja
 
-Do uzupełnienia.
+[PolyForm Shield 1.0.0](LICENSE.md) – Required Notice: Copyright PEPIX Piotr Misztal.
+
+W skrócie (wiążący jest tekst licencji):
+
+- możesz bezpłatnie używać ADCheck do dowolnego celu, także komercyjnie, np. do badania domeny własnej firmy lub organizacji, którą administrujesz,
+- możesz kopiować i modyfikować skrypt; przekazując go dalej, dołącz tekst licencji (lub jej adres) i linię `Required Notice`,
+- **nie możesz** oferować produktu ani usługi konkurencyjnej wobec ADCheck lub wobec usług, które licencjodawca świadczy z jego użyciem – np. sprzedawać przeglądów bezpieczeństwa AD wykonywanych tym narzędziem ani rozpowszechniać go w ramach własnego produktu,
+- oprogramowanie jest dostarczane bez gwarancji; autor nie odpowiada za skutki jego użycia.
+
+W sprawie innej licencji (np. do świadczenia usług) skontaktuj się z autorem.
 
 ---
 PEPIX · Kielce

@@ -5,6 +5,7 @@
 - Postęp w konsoli: połączenie z domeną, dane bazowe (liczba DC i kont uprzywilejowanych), każdy test z wynikiem (OK / liczba znalezisk i najwyższa waga / błąd) i czasem, zapis raportu, łączny czas przeglądu.
 - `-Silent`: bez komunikatów w konsoli; skrypt zwraca obiekt (Klient, Domena, Wynik, Dojrzalosc, Critical, High, Raport, Json, Csv, CzasSek) do użycia w skryptach.
 - Jednolita nazwa narzędzia **ADCheck**: plik `ADCheck.ps1` (wcześniej `PEPIX-ADCheck.ps1`), repozytorium `pepix-pm/ADCheck`, nagłówek w konsoli i stopka raportu; domyślny katalog wyników przy uruchomieniu z GitHuba: `%USERPROFILE%\ADCheck\raporty`.
+- Licencja **PolyForm Shield 1.0.0** (`LICENSE.md`, nota w pomocy skryptu `.NOTES`).
 - Metodyka w raporcie: neutralne sformułowanie o wprowadzaniu poleceń naprawczych (test skutków, zasady zarządzania zmianami organizacji).
 
 ## 0.21 – 2026-11-07

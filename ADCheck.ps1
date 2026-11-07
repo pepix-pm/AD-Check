@@ -21,6 +21,12 @@
     .\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
     .\ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
     # bez kopiowania pliku na serwer (z wydania na GitHubie, z weryfikacją SHA256) - patrz README, sekcja "Uruchomienie z GitHuba"
+
+.NOTES
+    Required Notice: Copyright PEPIX Piotr Misztal
+    Licencja: PolyForm Shield 1.0.0 - https://polyformproject.org/licenses/shield/1.0.0
+    Wolno używać, także w firmie; nie wolno oferować na tym narzędziu produktu ani usługi konkurencyjnej wobec licencjodawcy.
+    https://github.com/pepix-pm/ADCheck
 #>
 [CmdletBinding()]
 param(
