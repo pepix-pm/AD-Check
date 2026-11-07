@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26 – w przygotowaniu
+
+- **P-ACL-TIER0** (Critical/High): niebezpieczne uprawnienia i nietypowi właściciele na kontach i grupach uprzywilejowanych, kontach komputerów DC i OU Domain Controllers. Pomijane są wpisy skopiowane z AdminSDHolder (zgłasza je D-ACL-ADMINSDHOLDER) i podmioty, które już są uprzywilejowane.
+- **DC-RBCD** (Critical): RBCD ustawione na koncie kontrolera domeny.
+- **D-KCD-DC** (Critical/High): delegacja ograniczona do usług DC, z rozróżnieniem przejścia protokołu.
+- Wszystkie testy ACL rozpoznają też zapis msDS-KeyCredentialLink (Shadow Credentials), msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD) i servicePrincipalName (celowany Kerberoasting).
+
 ## 0.25 – 2026-11-07
 
 - Poprawka regresji z 0.24: błąd odczytu stref DNS przerywał cały test domeny (Kosz AD, polityka haseł, dSHeuristics, zaufania). Test stref DNS ma teraz własną obsługę błędu (ERR-DNS-ZONES) i oznacza jako „Błąd testu” tylko D-DNS-CREATECHILD.

@@ -128,6 +128,9 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-ACL-DOMAIN | Critical | GenericAll / WriteDacl / WriteOwner / zapis atrybutów obiektu domeny poza administratorami | T1222.001 |
 | D-ACL-ADMINSDHOLDER | Critical | Niestandardowe prawa zapisu lub resetu hasła na AdminSDHolder | T1098 |
 | D-ACL-GPO | High | GPO podpięte do domeny lub OU Domain Controllers modyfikowalne przez nie-adminów (obiekt AD i katalog SYSVOL) | T1484.001 |
+| P-ACL-TIER0 | Critical / High | Nie-admini z prawami do kont i grup uprzywilejowanych, kont DC lub OU Domain Controllers: pełna kontrola, WriteDacl, WriteOwner, zapis atrybutów, członkostwo, reset hasła, Shadow Credentials, RBCD, zapis SPN, nietypowy właściciel (High, gdy dotyczy tylko konta synchronizacji Entra ID) | T1222.001 |
+| DC-RBCD | Critical | RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) ustawione na koncie kontrolera domeny | T1558 |
+| D-KCD-DC | Critical / High | Delegacja ograniczona do usług DC (Critical przy przejściu protokołu na aktywnym koncie) | T1558 |
 | P-KRBTGT | High / Critical | Wiek hasła krbtgt (> 180 / > 365 dni) | T1558.001 |
 | P-PNE | High | Konta uprzywilejowane z hasłem bez wygasania | T1078.002 |
 | P-SPN | High | Konta uprzywilejowane z SPN | T1558.003 |
@@ -258,7 +261,7 @@ Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezale�
 
 ## Ograniczenia
 
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze usług certyfikatów (ADCS) ani stacji końcowych. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder i GPO podpiętych do domeny i OU Domain Controllers – nie na pojedynczych kontach, grupach, OU i komputerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
+Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze usług certyfikatów (ADCS) ani stacji końcowych. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder, GPO podpiętych do domeny i OU Domain Controllers oraz na obiektach Tier 0 (konta i grupy uprzywilejowane, konta DC, OU Domain Controllers) – nie na pozostałych kontach, OU i serwerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
 
 ## Zgoda na badanie i ślad w środowisku
 

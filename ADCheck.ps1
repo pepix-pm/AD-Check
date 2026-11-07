@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.25'
+$Version = '0.26'
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -105,7 +105,7 @@ $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8'
 $LdapServer = $Server
 $domainDn   = $rootDse.defaultNamingContext
 $ldapMulti  = @('serviceprincipalname', 'memberof', 'sidhistory', 'objectclass', 'member', 'serverreferencebl',
-                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl')
+                'msds-ncreplinboundneighbors', 'msds-replattributemetadata', 'msds-enabledfeaturebl', 'msds-allowedtodelegateto')
 
 function ConvertTo-LdapFilterValue([string]$Value) {
     $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
@@ -570,6 +570,9 @@ $ruleCatalog = @(
     @{ Id = 'D-ACL-DOMAIN';      O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Prawa przejęcia obiektu domeny' }
     @{ Id = 'D-ACL-ADMINSDHOLDER'; O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';        T = 'Niestandardowe uprawnienia na AdminSDHolder' }
     @{ Id = 'D-ACL-GPO';         O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL';          T = 'Edycja GPO domeny/DC przez nie-adminów' }
+    @{ Id = 'P-ACL-TIER0';       O = 'P'; M = 'Uprawnienia w katalogu (ACL)'; C = 'ACL-TIER0';    T = 'Prawa nie-adminów do kont, grup i DC (Tier 0)' }
+    @{ Id = 'DC-RBCD';           O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'RBCD na kontrolerze domeny' }
+    @{ Id = 'D-KCD-DC';          O = 'P'; M = 'Delegacja';                    C = 'ACL-TIER0';    T = 'Delegacja ograniczona do usług DC' }
 )
 # ---------- mapowanie na NIS2 / UKSC i ISO/IEC 27001:2022 ----------
 # Rodzaj ryzyka (M z katalogu reguł) -> środki z art. 21 ust. 2 NIS2 (wdrożone w UKSC, Dz. U. 2026 poz. 252) i zabezpieczenia z załącznika A ISO/IEC 27001:2022.
@@ -732,6 +735,9 @@ $planMeta = @{
     'D-ACL-DOMAIN'     = @(2, 8, 1, 'Exchange: aktualna CU i Setup /PrepareAD')
     'D-ACL-ADMINSDHOLDER' = @(1, 4, 1, 'Niewyjaśniony wpis traktować jak możliwy incydent')
     'D-ACL-GPO'        = @(1, 4, 1, 'Przegląd delegacji edycji GPO')
+    'P-ACL-TIER0'      = @(2, 8, 1, 'Ustalić pochodzenie każdego wpisu (dawne delegacje, Exchange, narzędzia)')
+    'DC-RBCD'          = @(0.5, 2, 1, 'Usunąć od razu; sprawdzić, kto ustawił (możliwy incydent)')
+    'D-KCD-DC'         = @(1, 4, 1, 'Ustalić, czemu służy delegacja; testy aplikacji przed zmianą')
     'DC-MSBASE'        = @(4, 12, 2, 'Import baseline z Security Compliance Toolkit do GPO testowego, porównanie w Policy Analyzer')
 }
 # Zwykła tabela, nie [ordered]: w OrderedDictionary indeks liczbowy oznacza pozycję, nie klucz. Kolejność: 1..3.
@@ -821,7 +827,7 @@ function Add-IfAny([hashtable]$F) {
 # Nazwy testów w konsoli
 $checkLabels = @{
     'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
-    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'
+    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia do kont, grup i DC (Tier 0), delegacja do DC'
     'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
     'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'
     'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
@@ -1769,6 +1775,9 @@ $aclGuid = @{
     ForceChangePwd     = [guid]'00299570-246d-11d0-a768-00aa006e0529'   # User-Force-Change-Password
     Member             = [guid]'bf9679c0-0de6-11d0-a285-00aa003049e2'   # atrybut member
     GpLink             = [guid]'f30e3bbe-9ff0-11d1-b603-0000f80367c1'   # atrybut gPLink
+    KeyCredLink        = [guid]'5b47d60f-6090-40b2-9f37-2a4de88f3063'   # msDS-KeyCredentialLink (Shadow Credentials)
+    Rbcd               = [guid]'3f78c3e5-f79a-46bd-a0b8-9d18116ddc79'   # msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD)
+    Spn                = [guid]'f3a64788-5306-11d1-a9c5-0000f80367c1'   # servicePrincipalName
 }
 
 # Niebezpieczne prawa w ACE obiektu AD -> lista opisów (pusta = ACE nieistotny)
@@ -1783,7 +1792,11 @@ function Get-AceDanger([System.DirectoryServices.ActiveDirectoryAccessRule]$Ace)
         if ($ot -eq [guid]::Empty)         { $why.Add('zapis wszystkich atrybutów') }
         elseif ($ot -eq $aclGuid.Member)   { $why.Add('zmiana członkostwa (member)') }
         elseif ($ot -eq $aclGuid.GpLink)   { $why.Add('podpinanie GPO (gPLink)') }
+        elseif ($ot -eq $aclGuid.KeyCredLink) { $why.Add('Shadow Credentials (zapis msDS-KeyCredentialLink)') }
+        elseif ($ot -eq $aclGuid.Rbcd)     { $why.Add('RBCD (zapis msDS-AllowedToActOnBehalfOfOtherIdentity)') }
+        elseif ($ot -eq $aclGuid.Spn)      { $why.Add('zapis SPN (celowany Kerberoasting)') }
     }
+    if (($r -band $R::Self) -and $ot -eq $aclGuid.Spn) { $why.Add('zapis SPN przez zapis zweryfikowany (celowany Kerberoasting)') }
     if ($r -band $R::ExtendedRight) {
         if ($ot -eq [guid]::Empty)                     { $why.Add('wszystkie prawa rozszerzone (w tym DCSync i reset haseł)') }
         elseif ($ot -eq $aclGuid.GetChangesAll)        { $why.Add('replikacja haseł (DS-Replication-Get-Changes-All, DCSync)') }
@@ -1910,6 +1923,123 @@ Invoke-Check 'ACL' {
                   'Set-GPPermission -Name "<GPO>" -TargetName "<podmiot>" -TargetType Group -PermissionLevel GpoRead -Replace',
                   'icacls "\\{DOMENA}\SYSVOL\{DOMENA}\Policies\{<GUID>}"   # uprawnienia katalogu')
         Mitre = 'T1484.001'
+    }
+}
+#endregion
+
+#region ---------- uprawnienia (ACL): obiekty Tier 0 i delegacja do DC ----------
+# Tier 0: konta i grupy uprzywilejowane, konta komputerów DC, OU Domain Controllers. Prawo zapisu, zmiany uprawnień
+# lub własność takiego obiektu w rękach nie-admina to krótka ścieżka do przejęcia domeny.
+Invoke-Check 'ACL-TIER0' {
+    $rootSid = $dSid
+    try { $rootSid = (Get-LdapObject -Identity $rootDse.rootDomainNamingContext).SID.Value } catch { $rootSid = $dSid }
+    $t0Trusted = @{}
+    # Account Operators ma domyślnie pełne prawa do kont spoza grup chronionych; sama grupa jest zgłaszana w P-AccountOperators
+    foreach ($s in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-5-10', 'S-1-3-0', "$dSid-512", "$dSid-516", "$dSid-521", "$rootSid-519", "$rootSid-498",
+                   'S-1-5-32-548') { $t0Trusted[$s] = $true }
+    # Wpisy skopiowane z AdminSDHolder zgłasza D-ACL-ADMINSDHOLDER - na kontach chronionych (adminCount=1) nie są powtarzane
+    $ashSids = @{}
+    try {
+        $ashSd = (Get-LdapObject -Identity "CN=AdminSDHolder,CN=System,$domainDn" -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
+        foreach ($r in @(Get-DangerousAces $ashSd $t0Trusted 'AdminSDHolder')) { $ashSids[$r.SID] = $true }
+    } catch { $null = $_ }
+
+    $targets = [System.Collections.Generic.List[object]]::new()
+    foreach ($u in $privUsers) { $targets.Add([pscustomobject]@{ Dn = "$($u.distinguishedname)"; Opis = "konto: $($u.SamAccountName)" }) }
+    foreach ($g in $privGroups.GetEnumerator()) {
+        try { $go = Get-LdapObject -Identity $g.Value; if ($go) { $targets.Add([pscustomobject]@{ Dn = "$($go.distinguishedname)"; Opis = "grupa: $($g.Key)" }) } } catch { $null = $_ }
+    }
+    foreach ($dc in $dcs) { $targets.Add([pscustomobject]@{ Dn = "$($dc.ComputerObjectDN)"; Opis = "kontroler domeny: $($dc.Name)" }) }
+    $targets.Add([pscustomobject]@{ Dn = $domain.DomainControllersContainer; Opis = 'OU Domain Controllers' })
+
+    $seen = @{}
+    $t0Rows = foreach ($t in $targets) {
+        if (-not $t.Dn -or $seen.ContainsKey($t.Dn)) { continue }
+        $seen[$t.Dn] = $true
+        $o = $null
+        try { $o = Get-LdapObject -Identity $t.Dn -Properties nTSecurityDescriptor, adminCount -SecurityDescriptor } catch { continue }
+        $sd = $o.ntsecuritydescriptor
+        if ($sd -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+        $prot = [int]$o.admincount -eq 1
+        foreach ($r in @(Get-DangerousAces $sd $t0Trusted $t.Opis)) {
+            # pomijane: wpisy z AdminSDHolder na kontach chronionych i konta, które już są uprzywilejowane (nie dają nowej ścieżki)
+            if (($prot -and $ashSids.ContainsKey($r.SID)) -or $privBySid.ContainsKey($r.SID)) { continue }
+            $r
+        }
+        try {
+            $own = $sd.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if (-not $t0Trusted.ContainsKey($own) -and -not $privBySid.ContainsKey($own)) {
+                [pscustomobject]@{ Obiekt = $t.Opis; Podmiot = (Resolve-SidName $own); Czlonkowie = (Get-PrincipalMemberList $own)
+                                   Prawa = 'właściciel obiektu (może nadać sobie dowolne uprawnienia)'; Dziedziczone = $false; SID = $own }
+            }
+        } catch { $null = $_ }
+    }
+    $syncRe = '^(MSOL_|AAD_|Sync_)'
+    $t0Rows = @($t0Rows | ForEach-Object {
+        $_ | Add-Member -NotePropertyName Uwagi -NotePropertyValue $(if (($_.Podmiot -split '\\')[-1] -match $syncRe) { 'prawdopodobnie konto synchronizacji Entra ID (zapis zwrotny haseł)' } else { '' }) -PassThru
+    })
+    Add-IfAny @{
+        Id = 'P-ACL-TIER0'; Category = $catPriv
+        Severity = $(if (@($t0Rows | Where-Object { -not $_.Uwagi }).Count) { 'Critical' } else { 'High' })
+        Title = 'Podmioty spoza administratorów z prawami do kont, grup lub kontrolerów domeny (Tier 0)'
+        Objects = $t0Rows
+        Description = 'Na kontach i grupach uprzywilejowanych, kontach komputerów DC lub OU Domain Controllers są wpisy dające prawa podmiotom spoza administratorów: pełną kontrolę, zmianę uprawnień, przejęcie własności, zapis atrybutów, zmianę członkostwa grupy, reset hasła, Shadow Credentials (dodanie własnego klucza do konta i logowanie bez hasła) albo RBCD. Każde z tych praw pozwala przejąć konto administratora lub DC, a więc całą domenę. Kolumna Czlonkowie pokazuje aktywne konta, które mają prawo przez grupę. Częste źródła: dawne delegacje helpdesku, Exchange, narzędzia do zarządzania kontami, konto, które utworzyło obiekt (właściciel).'
+        Recommendation = 'Ustalić pochodzenie każdego wpisu i usunąć zbędne. Konta i grupy uprzywilejowane powinny mieć uprawnienia wyłącznie z AdminSDHolder; obiekty DC i OU Domain Controllers - domyślne. Właścicielem obiektów Tier 0 powinni być Domain Admins. Wpisy, których nikt nie potrafi wyjaśnić, potraktować jako możliwy ślad incydentu (repadmin /showobjmeta pokaże datę zmiany).'
+        Fix = (Fx 'dsacls "<DN obiektu>"   # pełna lista uprawnień obiektu',
+                  'dsacls "<DN obiektu>" /R "<DOMENA>\<podmiot>"   # usuwa wpisy podmiotu - po weryfikacji',
+                  '# właściciel: Właściwości > Zabezpieczenia > Zaawansowane > Właściciel = Domain Admins')
+        Mitre = 'T1222.001'
+    }
+
+    # RBCD ustawione na kontach komputerów DC: wskazane konta mogą uzyskać bilet do usług DC jako dowolny użytkownik
+    $rbcdRows = foreach ($dc in $dcs) {
+        try {
+            $raw = (Get-LdapObject -Identity $dc.ComputerObjectDN -Properties 'msDS-AllowedToActOnBehalfOfOtherIdentity').'msds-allowedtoactonbehalfofotheridentity'
+            if ($raw) {
+                $rsd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+                $rsd.SetSecurityDescriptorBinaryForm([byte[]]$raw)
+                foreach ($a in $rsd.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+                    [pscustomobject]@{ DC = $dc.Name; Podmiot = (Resolve-SidName $a.IdentityReference.Value); SID = $a.IdentityReference.Value }
+                }
+            }
+        } catch { $null = $_ }
+    }
+    Add-IfAny @{
+        Id = 'DC-RBCD'; Category = $catDC; Severity = 'Critical'
+        Title = 'Delegacja ograniczona zasobowo (RBCD) ustawiona na kontrolerze domeny'
+        Objects = @($rbcdRows)
+        Description = 'Atrybut msDS-AllowedToActOnBehalfOfOtherIdentity na koncie DC pozwala wskazanym kontom uzyskać bilet Kerberos do dowolnej usługi tego DC w imieniu dowolnego użytkownika, także administratora domeny. Kto kontroluje takie konto (np. konto komputera utworzone dzięki MachineAccountQuota), przejmuje domenę. Na DC ten atrybut nie powinien być ustawiony; jego obecność bywa śladem ataku.'
+        Recommendation = 'Wyczyścić atrybut na kontach DC, ustalić, kto i kiedy go ustawił (repadmin /showobjmeta), i sprawdzić wskazane konta pod kątem przejęcia.'
+        Fix = (Fx 'Set-ADComputer -Identity <DC> -PrincipalsAllowedToDelegateToAccount $null',
+                  'repadmin /showobjmeta <DC> "<DN konta DC>" | Select-String msDS-AllowedToActOnBehalfOfOtherIdentity')
+        Mitre = 'T1558'
+    }
+
+    # Delegacja ograniczona (KCD) do usług kontrolerów domeny
+    $dcNames = @{}
+    foreach ($dc in $dcs) { $dcNames["$($dc.Name)".ToLower()] = $true; if ($dc.HostName) { $dcNames["$($dc.HostName)".ToLower()] = $true } }
+    $dcDns = @($dcs | ForEach-Object { "$($_.ComputerObjectDN)".ToLower() })
+    $kcdRows = foreach ($a in @(Find-Ldap -Filter '(msDS-AllowedToDelegateTo=*)' -Properties 'msDS-AllowedToDelegateTo')) {
+        if ($dcDns -contains "$($a.distinguishedname)".ToLower()) { continue }
+        $hits = @(@($a.'msds-allowedtodelegateto') | Where-Object { $dcNames.ContainsKey(((("$_" -split '/')[1]) -split ':')[0].ToLower()) })
+        if ($hits.Count) {
+            $uac = [int]$a.useraccountcontrol
+            [pscustomobject]@{ Konto = $a.samaccountname; Typ = $(if (@($a.objectclass) -contains 'computer') { 'komputer' } else { 'użytkownik' })
+                               Aktywne = -not ($uac -band 2); PrzejscieProtokolu = [bool]($uac -band 0x1000000); Uslugi = ($hits -join ', ') }
+        }
+    }
+    $kcdRows = @($kcdRows)
+    Add-IfAny @{
+        Id = 'D-KCD-DC'; Category = $catDC
+        Severity = $(if (@($kcdRows | Where-Object { $_.PrzejscieProtokolu -and $_.Aktywne }).Count) { 'Critical' } else { 'High' })
+        Title = 'Konta z delegacją ograniczoną do usług kontrolera domeny'
+        Objects = $kcdRows
+        Description = 'Konto z delegacją ograniczoną (msDS-AllowedToDelegateTo) może uzyskać bilet do wskazanej usługi DC w imieniu użytkownika. Przy przejściu protokołu (PrzejscieProtokolu = True) w imieniu dowolnego użytkownika, bez jego udziału - przejęcie takiego konta oznacza przejęcie DC. Nazwa usługi w bilecie nie jest chroniona, więc delegacja do jednej usługi (np. time/) zwykle daje też dostęp do innych na tym samym hoście (cifs/, ldap/, host/).'
+        Recommendation = 'Usunąć delegację do usług DC, jeśli nie jest niezbędna. Gdy jest - ograniczyć do konkretnej usługi bez przejścia protokołu, chronić konto jak Tier 0 (długie losowe hasło lub gMSA, brak logowania interaktywnego) i rozważyć zastąpienie jej RBCD ustawionym na serwerze docelowym.'
+        Fix = (Fx 'Get-ADObject -Filter ''msDS-AllowedToDelegateTo -like "*"'' -Properties msDS-AllowedToDelegateTo, userAccountControl',
+                  'Set-ADAccountControl -Identity <konto> -TrustedToAuthForDelegation $false   # wyłącza przejście protokołu',
+                  'Set-ADObject -Identity <DN konta> -Clear msDS-AllowedToDelegateTo')
+        Mitre = 'T1558'
     }
 }
 #endregion
@@ -3800,7 +3930,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('Przegląd wykonano narzędziem ADCheck na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
-[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder i GPO domeny/DC - usług certyfikatów (ADCS) ani stacji końcowych. ')
+[void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder, GPO domeny/DC oraz konta i grupy uprzywilejowane, konta DC i OU Domain Controllers - usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe: przed wykonaniem należy sprawdzić ich skutki w środowisku testowym i wprowadzać je zgodnie z zasadami zarządzania zmianami w organizacji.')
