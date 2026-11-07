@@ -1066,6 +1066,9 @@ foreach ($g in $privGroups.GetEnumerator()) {
 $privBySid = @{}
 foreach ($sid in $privSids.Keys) { $privBySid[$sid] = $privSids[$sid] }
 $privUsers = @($privBySid.Values)
+# Konto uruchamiające jest w grupie uprzywilejowanej (rekursywnie) - sondy uprawnień zwykłego konta są wtedy niemiarodajne
+$runAsPriv = $false
+try { $runAsPriv = $privBySid.ContainsKey([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } catch { $runAsPriv = $false }
 function Get-GroupRows([string]$Name) { @($groupMembers[$Name]) | ForEach-Object { ConvertTo-UserRow $privBySid[$_.SID.Value] } }
 
 $protectedUsersDn = $null
@@ -1919,9 +1922,6 @@ if (-not $SkipDCChecks) {
     $dcNtlm  = [System.Collections.Generic.List[object]]::new()
     $dcUnk   = [System.Collections.Generic.List[object]]::new()
     $dcSess  = [System.Collections.Generic.List[object]]::new()
-    # Konto uruchamiające jest w grupie uprzywilejowanej (rekursywnie) - sondy uprawnień zwykłego konta są wtedy niemiarodajne
-    $runAsPriv = $false
-    try { $runAsPriv = $privBySid.ContainsKey([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } catch { $runAsPriv = $false }
     $dcAnon  = [System.Collections.Generic.List[object]]::new()
 
     # NetSessionEnum (poziom 10) zwykłym kontem: 0/234 = lista sesji dostępna (brak NetCease), 5 = odmowa dostępu
@@ -2857,6 +2857,7 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
           elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
           elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
+          elseif ($r.Id -eq 'DC-NETSESSION' -and $runAsPriv) { 'Pominięty (konto uprzywilejowane)' }
           elseif ($r.N -and ($foundIds -contains $r.N)) { 'Nie dotyczy' }
           else { 'Zaliczony' }
     [pscustomobject]@{
@@ -3110,7 +3111,7 @@ $logoB64 = 'iVBORw0KGgoAAAANSUhEUgAAAcsAAAClCAYAAAAzi9bZAAArZElEQVR42u2dB3gU1drH
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.Append("<div class=`"wrap`"><header><div class=`"hd`"><img class=`"logo`" alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`"><div class=`"ht`"><h1>Przegląd bezpieczeństwa Active Directory</h1>")
 [void]$sb.Append("<p><b>Klient:</b> $(HtmlEnc $Klient) &nbsp;|&nbsp; <b>Domena:</b> $(HtmlEnc $domain.DNSRoot) &nbsp;|&nbsp; <b>Data:</b> $($now.ToString('dd.MM.yyyy HH:mm'))</p>")
-[void]$sb.Append("<p><b>Wykonał:</b> $(HtmlEnc $meta.Uruchomil) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; PEPIX AD-Check $Version</p></div></div>")
+[void]$sb.Append("<p><b>Wykonał:</b> $(HtmlEnc $meta.Uruchomil)$(if ($runAsPriv) { ' (konto uprzywilejowane)' }) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; PEPIX AD-Check $Version</p></div></div>")
 [void]$sb.Append('<div class="conf">DOKUMENT POUFNY - zawiera informacje o podatnościach infrastruktury klienta</div></header>')
 
 function Get-ScoreClass([int]$Points) { if ($Points -ge 30) { 'r3' } elseif ($Points -ge 10) { 'r2' } elseif ($Points -ge 1) { 'r1' } else { 'r0' } }
