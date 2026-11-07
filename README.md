@@ -2,6 +2,8 @@
 
 Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **zwykłym koncie domenowym**, bez instalacji agentów i bez narzędzi firm trzecich. Wynikiem jest szczegółowy raport HTML dla właściciela domeny i administratorów oraz dane JSON/CSV do porównań między przeglądami.
 
+Tworzy i rozwija [PEPIX](https://pepix.pl) – przeglądy bezpieczeństwa Active Directory, wdrożenia poprawek z raportu i stała opieka nad infrastrukturą Microsoft.
+
 ## Wymagania
 
 - Windows 10/11 lub Windows Server z PowerShellem (Windows PowerShell 5.1 lub PowerShell 7)
@@ -285,7 +287,7 @@ W skrócie (wiążący jest tekst licencji):
 - **nie możesz** oferować produktu ani usługi konkurencyjnej wobec ADCheck lub wobec usług, które licencjodawca świadczy z jego użyciem – np. sprzedawać przeglądów bezpieczeństwa AD wykonywanych tym narzędziem ani rozpowszechniać go w ramach własnego produktu,
 - oprogramowanie jest dostarczane bez gwarancji; autor nie odpowiada za skutki jego użycia.
 
-W sprawie innej licencji (np. do świadczenia usług) skontaktuj się z autorem.
+W sprawie innej licencji (np. do świadczenia usług) skontaktuj się z autorem przez [pepix.pl](https://pepix.pl).
 
 ---
-PEPIX · Kielce
+[PEPIX](https://pepix.pl) · Kielce
