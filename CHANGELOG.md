@@ -7,6 +7,7 @@
 - **D-KCD-DC** (Critical/High): delegacja ograniczona do usług DC, z rozróżnieniem przejścia protokołu.
 - Wszystkie testy ACL rozpoznają też zapis msDS-KeyCredentialLink (Shadow Credentials), msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD) i servicePrincipalName (celowany Kerberoasting).
 - **P-KeyAdmins**, **P-EnterpriseKeyAdmins** (Medium): niepuste grupy Key Admins / Enterprise Key Admins; ich członkowie są traktowani jak konta uprzywilejowane. Domyślne prawa tych grup do msDS-KeyCredentialLink (Windows Hello for Business) nie są już zgłaszane jako fałszywe alarmy w D-ACL-DOMAIN i P-ACL-TIER0.
+- Nazwy grup wbudowanych istniejących tylko na DC (np. Pre-Windows 2000 Compatible Access) są ustalane z LDAP, gdy przegląd działa ze stacji roboczej (wcześniej w raporcie zostawał sam SID).
 - Czytelny komunikat na starcie przy błędnym haśle (0x8007052E) i zablokowanym koncie (0x80070775).
 
 ## 0.25 – 2026-11-07

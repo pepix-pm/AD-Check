@@ -1055,6 +1055,13 @@ function Resolve-SidName([string]$Sid) {
     if (-not $sidNames.ContainsKey($Sid)) {
         $n = $Sid
         try { $n = (New-Object System.Security.Principal.SecurityIdentifier $Sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $n = $Sid }
+        # Grupy wbudowane istniejące tylko na DC (np. S-1-5-32-554 Pre-Windows 2000 Compatible Access) nie tłumaczą się na stacji roboczej - nazwa z LDAP
+        if ($n -eq $Sid) {
+            try {
+                $o = Get-LdapObject -Identity $Sid -Properties samaccountname
+                if ($o.samaccountname) { $n = $(if ($Sid -like 'S-1-5-32-*') { 'BUILTIN' } else { $domain.NetBIOSName }) + '\' + $o.samaccountname }
+            } catch { $n = $Sid }
+        }
         $sidNames[$Sid] = $n
     }
     $sidNames[$Sid]
