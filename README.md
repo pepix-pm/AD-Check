@@ -30,6 +30,7 @@ clear
 | `-UseWinRM` | Testy DC z rejestru przez WinRM (wymaga admina na DC) |
 | `-SkipDCChecks` | Pomija testy kontrolerów domeny |
 | `-MaxRows` | Maksymalna liczba obiektów na znalezisko w HTML (domyślnie 500; pełna lista w CSV) |
+| `-Silent` | Bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików (do automatyzacji) |
 
 ## Stacja robocza Windows 10/11
 

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory (wersja 0.15)
+    PEPIX AD-Check — przegląd bezpieczeństwa Active Directory
 
 .DESCRIPTION
     Uruchamiać ze stacji w domenie klienta. Nie wymaga RSAT: AD odczytywane przez LDAP (System.DirectoryServices).
@@ -10,6 +10,7 @@
       - SMBv1 na DC: sonda negocjacji SMB1 na TCP 445,
       - podpisywanie LDAP, channel binding, poziom NTLM: odczyt GPO z SYSVOL (GptTmpl.inf).
     -UseWinRM: zamiast GPO i sond odczyt rzeczywistych wartości z rejestru DC (wymaga admina na DC).
+    -Silent: bez komunikatów postępu w konsoli; skrypt zwraca obiekt z wynikiem i ścieżkami plików.
     Wynik: szczegółowy raport HTML, JSON (do porównań), CSV znalezisk i CSV obiektów.
     Punkty: Critical=25, High=10, Medium=3, Low=1 za znalezisko; wynik 0-100 w czterech obszarach ryzyka,
     wynik ogólny = najgorszy obszar, poziom dojrzałości 1-5; im mniej punktów, tym lepiej.
@@ -18,6 +19,7 @@
     .\PEPIX-ADCheck.ps1 -Klient KLIENT
     .\PEPIX-ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
     .\PEPIX-ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
+    .\PEPIX-ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
     # bez kopiowania pliku na serwer (z prywatnego repo GitHub) - patrz README, sekcja "Uruchomienie z GitHuba"
 #>
 [CmdletBinding()]
@@ -29,11 +31,21 @@ param(
     [string]$Previous,
     [switch]$UseWinRM,
     [switch]$SkipDCChecks,
-    [int]$MaxRows = 500
+    [int]$MaxRows = 500,
+    [switch]$Silent
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.21'
+$Version = '0.22'
+$runTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
+function Write-Step([string]$Text = '', [string]$Color = 'Gray', [switch]$NoNewline) {
+    if ($Silent) { return }
+    Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
+}
+Write-Step "PEPIX AD-Check $Version | klient: $Klient | domena: $Server | konto: $env:USERDOMAIN\$env:USERNAME" 'Cyan'
+Write-Step 'Sprawdzanie wymagań i połączenia z domeną...'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -70,6 +82,7 @@ if ($braki.Count -eq 0) {
 if ($braki.Count -gt 0) {
     throw ("Niespełnione wymagania PEPIX AD-Check:`n - " + ($braki -join "`n - "))
 }
+Write-Step "  połączono z $($rootDse.dnsHostName) ($($rootDse.defaultNamingContext))" 'Green'
 
 if (-not $OutDir) {
     # z pliku: obok skryptu; z GitHuba: profil użytkownika (nie bieżący katalog - w sesji admina to często System32)
@@ -774,11 +787,45 @@ function Add-IfAny([hashtable]$F) {
     }
 }
 
+# Nazwy testów w konsoli
+$checkLabels = @{
+    'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
+    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'
+    'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
+    'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'
+    'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
+    'BACKUP' = 'Kopia zapasowa AD'; 'SYSVOL-FRS' = 'Replikacja SYSVOL'; 'FSMO' = 'Role FSMO'; 'DC-REG' = 'Rejestracja kontrolerów domeny'
+    'SITES' = 'Lokacje i podsieci'; 'DC-MACHINEPWD' = 'Hasła kont komputerów DC'; 'DC-NET' = 'Porty i udziały DC'
+    'GPO-SYNC' = 'Spójność GPO (AD / SYSVOL)'; 'DC-DNS' = 'Rekordy DNS kontrolerów'
+}
+function Format-Count([int]$N) {
+    $w = if ($N -eq 1) { 'znalezisko' } elseif ($N % 10 -in 2, 3, 4 -and $N % 100 -notin 12, 13, 14) { 'znaleziska' } else { 'znalezisk' }
+    "$N $w"
+}
+
+# Test w izolacji: błąd trafia do raportu jako Info, nie przerywa przeglądu; w konsoli wynik i czas
 function Invoke-Check([string]$Name, [scriptblock]$Block) {
+    $label  = if ($checkLabels.ContainsKey($Name)) { $checkLabels[$Name] } elseif ($Name -like 'DC-*') { "Sondy DC: $($Name.Substring(3))" } else { $Name }
+    $before = $findings.Count
+    $timer  = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Step ('  {0,-44}' -f $label) -NoNewline
+    $err = $null
     try { & $Block }
     catch {
+        $err = $_.Exception.Message
         Add-Finding @{ Id = "ERR-$Name"; Category = 'Błędy testów'; Severity = 'Info'
-                       Title = "Test $($Name) nie wykonany: $($_.Exception.Message)" }
+                       Title = "Test $($Name) nie wykonany: $err" }
+    }
+    $sec = $timer.Elapsed.TotalSeconds.ToString('0.0', [System.Globalization.CultureInfo]'pl-PL')
+    $new = @($findings | Select-Object -Skip $before | Where-Object { $_.Severity -ne 'Info' })
+    if ($err) {
+        Write-Step "błąd: $err" 'Red'
+    } elseif ($new.Count) {
+        $top = @('Critical', 'High', 'Medium', 'Low' | Where-Object { $new.Severity -contains $_ })[0]
+        $col = @{ Critical = 'Red'; High = 'Red'; Medium = 'Yellow'; Low = 'DarkYellow' }[$top]
+        Write-Step "$(Format-Count $new.Count), najwyższe: $top  ($sec s)" $col
+    } else {
+        Write-Step "OK  ($sec s)" 'Green'
     }
 }
 
@@ -1102,6 +1149,7 @@ function Format-EncTypes($Value) {
 #endregion
 
 #region ---------- dane bazowe i inwentaryzacja ----------
+Write-Step 'Odczyt danych bazowych (kontrolery domeny, polityka haseł, zaufania, grupy uprzywilejowane)...'
 $dcs = @(Get-LdapDomainControllers)
 $pp  = Get-LdapPasswordPolicy
 $trusts = @()
@@ -1166,6 +1214,8 @@ $invPriv = foreach ($gName in $privGroups.Keys) {
 }
 #endregion
 
+Write-Step "  kontrolery domeny: $($dcs.Count) ($(($dcs | ForEach-Object { $_.Name }) -join ', ')), konta uprzywilejowane: $($privUsers.Count)$(if ($runAsPriv) { ' - uruchomiono kontem uprzywilejowanym' })" 'Green'
+Write-Step "Testy$(if ($SkipDCChecks) { ' (bez testów DC: -SkipDCChecks)' } elseif ($UseWinRM) { ' (z odczytem DC przez WinRM)' }):"
 #region ---------- konta uprzywilejowane ----------
 Invoke-Check 'PRIV' {
     $da = @($groupMembers['Domain Admins'])
@@ -3255,6 +3305,7 @@ $invTrusts = @($trusts | ForEach-Object {
 #endregion
 
 #region ---------- wynik: pliki ----------
+Write-Step "Zapis raportu do $OutDir..."
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $base = Join-Path $OutDir ('AD_{0}_{1}_{2:yyyyMMdd-HHmm}' -f $Klient, $domain.DNSRoot, $now)
 
@@ -3549,9 +3600,20 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 ConvertTo-Html -Head $css -Title "AD $Klient $($now.ToString('yyyy-MM-dd'))" -Body $sb.ToString() | Set-Content "$base.html" -Encoding $encOut
 #endregion
 
-Write-Host "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100 | Dojrzałość: $maturity/5 | Testy DC: $dcMethod" -ForegroundColor Cyan
-Write-Host (($areaScore.Keys | ForEach-Object { "$($_): $($areaScore[$_])" }) -join ' | ') -ForegroundColor Cyan
-$real | Format-Table Severity, Category, Title -AutoSize
-Write-Host "Raport: $base.html" -ForegroundColor Green
-Write-Host "Dane:   $base.json | $base.csv | $base`_obiekty.csv | $base`_plan.csv" -ForegroundColor Green
-Write-Host "Plan naprawczy: $($planRows.Count) zadań, $(Format-Hours (($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum))-$(Format-Hours (($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum)) h" -ForegroundColor Green
+$totalH = "$(Format-Hours (($planSum.Values | ForEach-Object { $_[0] } | Measure-Object -Sum).Sum))-$(Format-Hours (($planSum.Values | ForEach-Object { $_[1] } | Measure-Object -Sum).Sum)) h"
+if ($Silent) {
+    # Tryb bez komunikatów: tylko obiekt wyniku (do skryptów i automatyzacji)
+    [pscustomobject]@{
+        Klient = $Klient; Domena = $domain.DNSRoot; Wynik = $score; Dojrzalosc = $maturity
+        Critical = @($real | Where-Object Severity -eq 'Critical').Count; High = @($real | Where-Object Severity -eq 'High').Count
+        Raport = "$base.html"; Json = "$base.json"; Csv = "$base.csv"; CzasSek = [int]$runTimer.Elapsed.TotalSeconds
+    }
+} else {
+    Write-Step "`nKlient: $Klient | Domena: $($domain.DNSRoot) | Wynik: $score/100 | Dojrzałość: $maturity/5 | Testy DC: $dcMethod" 'Cyan'
+    Write-Step (($areaScore.Keys | ForEach-Object { "$($_): $($areaScore[$_])" }) -join ' | ') 'Cyan'
+    $real | Format-Table Severity, Category, Title -AutoSize | Out-Host
+    Write-Step "Raport: $base.html" 'Green'
+    Write-Step "Dane:   $base.json | $base.csv | $base`_obiekty.csv | $base`_plan.csv" 'Green'
+    Write-Step "Plan naprawczy: $($planRows.Count) zadań, $totalH" 'Green'
+    Write-Step "Czas przeglądu: $([int]$runTimer.Elapsed.TotalMinutes) min $($runTimer.Elapsed.Seconds) s"
+}

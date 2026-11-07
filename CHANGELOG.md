@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.22 – 2026-11-07
+
+- Postęp w konsoli: połączenie z domeną, dane bazowe (liczba DC i kont uprzywilejowanych), każdy test z wynikiem (OK / liczba znalezisk i najwyższa waga / błąd) i czasem, zapis raportu, łączny czas przeglądu.
+- `-Silent`: bez komunikatów w konsoli; skrypt zwraca obiekt (Klient, Domena, Wynik, Dojrzalosc, Critical, High, Raport, Json, Csv, CzasSek) do użycia w skryptach.
+
 ## 0.21 – 2026-11-07
 
 - Porównanie konfiguracji DC także z **Microsoft Security Baseline** dla Windows Server 2025 (profil Domain Controller; wartości wg Microsoft Learn, stan 2026-01): kolumny Microsoft i ZgodneMS w tabelach CIS, 7 dodatkowych ustawień spoza wybranych kontroli CIS (m.in. AllowCustomSSPsAPs, UseMachineId, AutoDisconnect).
