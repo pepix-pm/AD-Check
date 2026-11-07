@@ -8,3 +8,8 @@ raporty/
 .vscode/
 *.log
 Thumbs.db
+
+# Lokalne instrukcje dla asystenta - poza repo
+CLAUDE.md
+CLAUDE.local.md
+.claude/
