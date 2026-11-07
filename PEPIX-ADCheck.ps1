@@ -1919,6 +1919,9 @@ if (-not $SkipDCChecks) {
     $dcNtlm  = [System.Collections.Generic.List[object]]::new()
     $dcUnk   = [System.Collections.Generic.List[object]]::new()
     $dcSess  = [System.Collections.Generic.List[object]]::new()
+    # Konto uruchamiające jest w grupie uprzywilejowanej (rekursywnie) - sondy uprawnień zwykłego konta są wtedy niemiarodajne
+    $runAsPriv = $false
+    try { $runAsPriv = $privBySid.ContainsKey([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } catch { $runAsPriv = $false }
     $dcAnon  = [System.Collections.Generic.List[object]]::new()
 
     # NetSessionEnum (poziom 10) zwykłym kontem: 0/234 = lista sesji dostępna (brak NetCease), 5 = odmowa dostępu
@@ -1992,7 +1995,9 @@ public static class PepixNetApi {
             }
 
             # Sondy behawioralne (zwykłe konto, bez zmian na DC) - każda we własnym try, żeby błąd sondy nie przerywał testów DC
-            if ('PepixNetApi' -as [type]) {
+            if ($runAsPriv) {
+                $dcUnk.Add([pscustomobject]@{ DC = $h; Test = 'NetSessionEnum (DC-NETSESSION)'; Metoda = 'pominięte - przegląd uruchomiony kontem uprzywilejowanym, administrator zawsze widzi sesje' })
+            } elseif ('PepixNetApi' -as [type]) {
                 try {
                     $rc = [PepixNetApi]::Probe("\\$h")
                     if ($rc -in 0, 234) { $dcSess.Add([pscustomobject]@{ DC = $h; Wynik = 'NetSessionEnum dostępne dla zwykłego konta'; Metoda = 'NetSessionEnum poziom 10' }) }
