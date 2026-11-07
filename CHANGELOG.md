@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19 – 2026-11-07
+
+Poprawki po pierwszym przebiegu 0.18 w środowisku produkcyjnym:
+- **Błąd:** sonda anonimowego LDAP przerywała testy DC wyjątkiem „retrieving member Dispose” (adapter PowerShell dla DirectoryEntry). Skutek: DC-LDAPSIGN, DC-LDAPCBT i DC-NTLMV1 oznaczone jako błąd testu. Metody DirectoryEntry wywoływane teraz przez `.psbase`, sondy są po głównych testach DC i każda ma własną obsługę błędów.
+- Windows 11 build 26300 = 26H2 (daty końca wsparcia szacunkowe, do potwierdzenia po GA).
+- DC-REGISTRATION: rozróżnia pozostałość po zdegradowanym DC (konto serwera bez flagi DC w OU Domain Controllers, pozostały obiekt serwera w lokacjach) od zwykłego komputera w tej OU.
+- DC-SUBNET: osobny tytuł, gdy w AD nie ma żadnej podsieci; opis uwzględnia liczbę lokacji.
+- C-OWNER: obiekty, których właściciela nie udało się odczytać, zgłaszane jako Info (C-OWNER-UNKNOWN) zamiast pomijane po cichu.
+- Poprawiona odmiana w opisie C-LAPS-MISSING.
+
 ## 0.18 – 2026-11-06
 
 Nowe testy (zwykłe konto, tylko odczyt):

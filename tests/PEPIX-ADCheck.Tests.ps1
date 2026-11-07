@@ -158,7 +158,8 @@ Describe 'Get-OsLifecycle' {
         @{ Os = 'Windows XP Professional x64 Edition'; Ver = '5.2 (3790)'; Typ = 'Legacy'; Wersja = 'Windows XP' }
         @{ Os = 'Windows 10 IoT Enterprise LTSC';   Ver = '10.0 (19044)'; Typ = 'LTSC';   Wersja = 'LTSC 2021' }
         @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (26200)'; Typ = 'W11';    Wersja = '25H2' }
-        @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (26300)'; Typ = 'W11';    Wersja = 'build 26300 (nowsza niż tabela / Insider)' }
+        @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (26300)'; Typ = 'W11';    Wersja = '26H2' }
+        @{ Os = 'Windows 11 Pro';                   Ver = '10.0 (28000)'; Typ = 'W11';    Wersja = 'build 28000 (nowsza niż tabela / Insider)' }
         @{ Os = '';                                 Ver = '';             Typ = 'Inne';   Wersja = '' }
         @{ Os = 'Linux';                            Ver = '';             Typ = 'Inne';   Wersja = '' }
     ) {

@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.18'
+$Version = '0.19'
 
 #region ---------- wymagania ----------
 # Sprawdzane ręcznie zamiast #Requires: skrypt bywa uruchamiany jako scriptblock (z GitHuba), gdzie #Requires nie działa.
@@ -61,7 +61,7 @@ if ($braki.Count -eq 0) {
             rootDomainNamingContext    = [string]$rde.Properties['rootDomainNamingContext'].Value
             dnsHostName                = [string]$rde.Properties['dnsHostName'].Value
         }
-        $rde.Dispose()
+        $rde.psbase.Dispose()
         if (-not $rootDse.defaultNamingContext) { throw 'pusta odpowiedź RootDSE' }
     } catch {
         $braki.Add("Brak połączenia LDAP z domeną ($Server): $($_.Exception.Message). Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.")
@@ -156,7 +156,8 @@ function Find-Ldap {
         foreach ($r in $res) { ConvertFrom-LdapResult $r.Properties }
     } finally {
         if ($res) { $res.Dispose() }
-        $s.Dispose(); $root.Dispose()
+        $s.Dispose()
+        try { $root.psbase.Dispose() } catch { $null = $_ }   # psbase: adapter DirectoryEntry traktuje metody jak atrybuty LDAP
     }
 }
 
@@ -262,7 +263,7 @@ function Get-LdapTrusts {
 function Get-LdapReplPartners([string]$Dc) {
     $rde = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$Dc/RootDSE")
     $ncs = @($rde.Properties['namingContexts'] | ForEach-Object { "$_" })
-    $rde.Dispose()
+    $rde.psbase.Dispose()
     foreach ($nc in $ncs) {
         $o = Get-LdapObject -Identity $nc -Server $Dc -Properties 'msDS-NCReplInboundNeighbors'
         foreach ($x in @($o.'msds-ncreplinboundneighbors' | Where-Object { $_ })) {
@@ -346,6 +347,7 @@ $win11Builds = @{
     22631 = @{ Nazwa = '23H2'; Ent = '2026-11-10'; Pro = '2025-11-11' }
     26100 = @{ Nazwa = '24H2'; Ent = '2027-10-12'; Pro = '2026-10-13' }
     26200 = @{ Nazwa = '25H2'; Ent = '2028-10-10'; Pro = '2027-10-12' }
+    26300 = @{ Nazwa = '26H2'; Ent = '2029-10-09'; Pro = '2028-10-10' }   # szacunek (24/36 mies. od jesieni 2026) - potwierdzić po GA
 }
 $win10Ltsc = @{
     10240 = @{ Nazwa = 'LTSB 2015'; Koniec = '2025-10-14' }
@@ -411,7 +413,7 @@ function Get-OsLifecycle([string]$Os, [string]$Ver) {
             $ent = $Os -match 'Enterprise|Education' -and $Os -notmatch 'Pro Education'
             $r.Wersja = $b.Nazwa
             $r.Koniec = [datetime]$(if ($ent) { $b.Ent } else { $b.Pro })
-        } elseif ($build -gt 26200) { $r.Wersja = "build $build (nowsza niż tabela / Insider)" }   # bez oceny
+        } elseif ($build -gt 26300) { $r.Wersja = "build $build (nowsza niż tabela / Insider)" }   # bez oceny
         else { $r.Wersja = "build $build" }
         return $r
     }
@@ -1460,7 +1462,7 @@ Invoke-Check 'COMPUTERS' {
             Id = 'C-LAPS-MISSING'; Category = $catComp; Severity = 'Medium'
             Title = 'Komputery bez hasła zarządzanego przez LAPS'
             Objects = ($lapsRows | Where-Object { -not $_.Typ } | ForEach-Object { ConvertTo-ComputerRow $_.C })
-            Description = "Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS (LAPS ma $covered z $($lapsRows.Count) aktywnych kont komputerów Windows poza DC; pominięto $lapsSkip kont bez systemu Windows w atrybucie operatingSystem). Ich lokalne hasło administratora jest prawdopodobnie wspólne z innymi komputerami."
+            Description = "Te komputery nie mają hasła lokalnego administratora zarządzanego przez LAPS (LAPS ma $covered z $($lapsRows.Count) aktywnych kont komputerów Windows poza DC; pominięte konta bez systemu Windows w atrybucie operatingSystem: $lapsSkip). Ich lokalne hasło administratora jest prawdopodobnie wspólne z innymi komputerami."
             Recommendation = 'Sprawdzić, czy OU są objęte GPO LAPS i czy komputery mają uprawnienie do zapisu hasła. Urządzenia spoza Windows (np. Linux, NAS) wyłączyć z oceny lub zarządzać ich hasłami inaczej.'
             Fix = (Fx 'Set-LapsADComputerSelfPermission -Identity ''<DN OU>''', 'gpresult /r   # na komputerze: czy GPO LAPS jest zastosowane', 'Get-WinEvent -LogName ''Microsoft-Windows-LAPS/Operational'' -MaxEvents 20   # na komputerze')
             Mitre = 'T1550.002'
@@ -1515,9 +1517,12 @@ Invoke-Check 'COMP-OWNER' {
         }
         $sidName[$Sid]
     }
-    $rows = foreach ($c in @(Find-Ldap -SecurityDescriptor -Properties nTSecurityDescriptor, operatingSystem, primaryGroupID, 'mS-DS-CreatorSID' -Filter (
-                '(&(objectCategory=computer)(mS-DS-CreatorSID=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))'))) {
-        if ([int]$c.primarygroupid -in 516, 521 -or $c.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
+    $created = @(Find-Ldap -SecurityDescriptor -Properties nTSecurityDescriptor, operatingSystem, primaryGroupID, 'mS-DS-CreatorSID' -Filter (
+                '(&(objectCategory=computer)(mS-DS-CreatorSID=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))') |
+                Where-Object { [int]$_.primarygroupid -notin 516, 521 })
+    $noSd = @($created | Where-Object { $_.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity] }).Count
+    $rows = foreach ($c in $created) {
+        if ($c.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
         $owner = "$($c.ntsecuritydescriptor.GetOwner([System.Security.Principal.SecurityIdentifier]))"
         if ($owner -in $okOwners) { continue }
         $creator = ''
@@ -1536,6 +1541,11 @@ Invoke-Check 'COMP-OWNER' {
                   '$acl.SetOwner([System.Security.Principal.SecurityIdentifier]''{SID}-512''); Set-Acl -Path "AD:$($c.DistinguishedName)" -AclObject $acl',
                   'Get-ADComputer -Filter * -Properties msDS-AllowedToActOnBehalfOfOtherIdentity | Where-Object msDS-AllowedToActOnBehalfOfOtherIdentity')
         Mitre = 'T1134'
+    }
+    if ($noSd) {
+        Add-Finding @{ Id = 'C-OWNER-UNKNOWN'; Category = 'Błędy testów'; Severity = 'Info'
+                       Title = "Nie odczytano właściciela $noSd z $($created.Count) kont komputerów utworzonych przez użytkowników (mS-DS-CreatorSID)"
+                       Description = 'Brak uprawnienia do odczytu deskryptora zabezpieczeń - test C-OWNER nie objął tych obiektów.' }
     }
 }
 #endregion
@@ -1974,12 +1984,23 @@ public static class PepixNetApi {
                 'Tak' { $dcSmb1.Add([pscustomobject]@{ DC = $h; Wynik = 'SMBv1 przyjmuje połączenia'; Metoda = $st.SMB1Src }) }
                 '?'   { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = 'SMBv1 (brak połączenia z TCP 445)'; Metoda = $st.SMB1Src }) }
             }
-            # Sondy behawioralne (zwykłe konto, bez zmian na DC): wyliczanie sesji SMB i anonimowe zapytanie LDAP
-            if ('PepixNetApi' -as [type]) {
-                $rc = [PepixNetApi]::Probe("\\$h")
-                if ($rc -in 0, 234) { $dcSess.Add([pscustomobject]@{ DC = $h; Wynik = 'NetSessionEnum dostępne dla zwykłego konta'; Metoda = 'NetSessionEnum poziom 10' }) }
-                elseif ($rc -ne 5) { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = "NetSessionEnum (kod $rc)"; Metoda = 'NetSessionEnum poziom 10' }) }
+            if ($st.Ldap -ne 2) { $dcLdap.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Ldap $mapLdap); Zrodlo = $st.LdapSrc }) }
+            if ($st.Cbt  -ne 2) { $dcCbt.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Cbt $mapCbt); Zrodlo = $st.CbtSrc }) }
+            # Windows Server 2025 nie obsługuje już NTLMv1 - pomijamy
+            if ($dc.OperatingSystem -notmatch '2025' -and ($null -eq $st.Lm -or $st.Lm -lt 5)) {
+                $dcNtlm.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Lm $mapLm); Zrodlo = $st.LmSrc })
             }
+
+            # Sondy behawioralne (zwykłe konto, bez zmian na DC) - każda we własnym try, żeby błąd sondy nie przerywał testów DC
+            if ('PepixNetApi' -as [type]) {
+                try {
+                    $rc = [PepixNetApi]::Probe("\\$h")
+                    if ($rc -in 0, 234) { $dcSess.Add([pscustomobject]@{ DC = $h; Wynik = 'NetSessionEnum dostępne dla zwykłego konta'; Metoda = 'NetSessionEnum poziom 10' }) }
+                    elseif ($rc -ne 5) { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = "NetSessionEnum (kod $rc)"; Metoda = 'NetSessionEnum poziom 10' }) }
+                } catch { $dcUnk.Add([pscustomobject]@{ DC = $h; Test = 'NetSessionEnum'; Metoda = $_.Exception.Message }) }
+            }
+            # Anonimowy LDAP. Uwaga: metody DirectoryEntry wywoływać przez .psbase - adapter PowerShell przy nieudanym
+            # powiązaniu próbuje odczytać "Dispose" jako atrybut LDAP i rzuca wyjątek.
             $anonDe = $null; $anonS = $null
             try {
                 $anonDe = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://$h/$domainDn", $null, $null, [System.DirectoryServices.AuthenticationTypes]::Anonymous)
@@ -1990,14 +2011,8 @@ public static class PepixNetApi {
             } catch {
                 $null = $_   # oczekiwane: "operations error" = operacje anonimowe zablokowane
             } finally {
-                if ($anonS) { $anonS.Dispose() }
-                if ($anonDe) { $anonDe.Dispose() }
-            }
-            if ($st.Ldap -ne 2) { $dcLdap.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Ldap $mapLdap); Zrodlo = $st.LdapSrc }) }
-            if ($st.Cbt  -ne 2) { $dcCbt.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Cbt $mapCbt); Zrodlo = $st.CbtSrc }) }
-            # Windows Server 2025 nie obsługuje już NTLMv1 - pomijamy
-            if ($dc.OperatingSystem -notmatch '2025' -and ($null -eq $st.Lm -or $st.Lm -lt 5)) {
-                $dcNtlm.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Lm $mapLm); Zrodlo = $st.LmSrc })
+                try { if ($anonS) { $anonS.Dispose() } } catch { $null = $_ }
+                try { if ($anonDe) { $anonDe.psbase.Dispose() } } catch { $null = $_ }
             }
         }
     }
@@ -2610,7 +2625,10 @@ Invoke-Check 'DC-REG' {
         $flag  = [bool]($uac -band 0x2000) -or [bool]($uac -band 0x4000000)
         $group = $pg -in 516, 521
         if (-not $flag -and -not $group) {
-            $problems.Add('zwykły komputer w OU Domain Controllers (obejmują go zasady GPO dla DC)')
+            $srvDn = @($c.serverreferencebl | Where-Object { $_ -like "*,CN=Sites,$configDn" })[0]
+            $problems.Add($(if ($srvDn) { "konto bez flagi DC w OU Domain Controllers, z pozostałym obiektem serwera w lokacjach ($srvDn) - prawdopodobnie DC zdegradowany bez usunięcia metadanych" }
+                            elseif ("$($c.operatingsystem)" -match 'Server') { 'konto bez flagi DC w OU Domain Controllers - prawdopodobnie pozostałość po zdegradowanym DC (obejmują je zasady GPO dla DC)' }
+                            else { 'zwykły komputer w OU Domain Controllers (obejmują go zasady GPO dla DC)' }))
         } else {
             if ($flag -ne $group) { $problems.Add("niespójne konto: primaryGroupID $pg, flaga DC $(if ($flag) { 'tak' } else { 'nie' })") }
             $srvDn = @($c.serverreferencebl | Where-Object { $_ -like "*,CN=Sites,$configDn" })[0]
@@ -2648,16 +2666,20 @@ Invoke-Check 'SITES' {
         if (-not $dc.IPv4Address) { continue }   # nierozwiązywalny DC - patrz DC-PORTS
         $best = @($subnets | Where-Object { Test-IpInSubnet $dc.IPv4Address $_.name } |
                   Sort-Object { [int](($_.name -split '/')[1]) } -Descending)[0]
-        $problem = if (-not $best) { 'adres poza wszystkimi podsieciami AD' }
+        $problem = if (-not $subnets.Count) { 'w AD nie zdefiniowano żadnej podsieci' }
+                   elseif (-not $best) { 'adres poza wszystkimi podsieciami AD' }
                    elseif (-not $best.siteobject) { "podsieć $($best.name) bez przypisanej lokacji" }
                    elseif ($dc.Site -and (& $siteOf $best.siteobject) -ne $dc.Site) { "podsieć $($best.name) należy do lokacji $(& $siteOf $best.siteobject)" }
         if ($problem) { [pscustomobject]@{ DC = $dc.HostName; Adres = $dc.IPv4Address; LokacjaDC = $dc.Site; Problem = $problem } }
     }
+    $siteCount = @(Find-Ldap -SearchBase "CN=Sites,$configDn" -Scope OneLevel -Filter '(objectClass=site)').Count
+    $impact = if ($siteCount -le 1) { "Domena ma jedną lokację ($siteCount), więc wpływ na wybór DC jest dziś niewielki; podsieci będą potrzebne po dodaniu drugiej lokacji (oddział, DC w chmurze), a ich brak zaśmieca dziennik NETLOGON." }
+              else { "Domena ma $siteCount lokacje/lokacji - klienci mogą uwierzytelniać się do odległego DC przez łącza WAN." }
     Add-IfAny @{
         Id = 'DC-SUBNET'; Category = $catHealth; Severity = 'Low'
-        Title = 'Kontrolery domeny poza podsieciami AD swojej lokacji'
+        Title = $(if (-not $subnets.Count) { 'W AD nie zdefiniowano podsieci - adresy DC nie są przypisane do lokacji' } else { 'Kontrolery domeny poza podsieciami AD swojej lokacji' })
         Objects = $rows
-        Description = "Lokacje i podsieci AD decydują, z którym DC łączą się komputery i jak przebiega replikacja. Gdy adresu DC nie ma w żadnej podsieci albo podsieć wskazuje inną lokację, klienci mogą uwierzytelniać się do odległego DC przez łącza WAN, a DC rejestrują zdarzenia NETLOGON 5807. Zwykle brakuje wtedy podsieci także dla innych segmentów sieci (zmiana adresacji, nowe VLAN-y). Zdefiniowanych podsieci: $($subnets.Count). Adres DC ustalony przez DNS ze stacji uruchamiającej przegląd."
+        Description = "Lokacje i podsieci AD decydują, z którym DC łączą się komputery i jak przebiega replikacja. Gdy adresu DC (lub klienta) nie ma w żadnej podsieci albo podsieć wskazuje inną lokację, Windows nie wie, który DC jest najbliższy, a DC rejestrują zdarzenia NETLOGON 5807. $impact Zdefiniowanych podsieci: $($subnets.Count). Adres DC ustalony przez DNS ze stacji uruchamiającej przegląd."
         Recommendation = 'Dodać podsieci wszystkich segmentów sieci (także serwerowych i VPN) i przypisać je do właściwych lokacji. Adresy klientów spoza podsieci są w pliku %SystemRoot%\debug\netlogon.log na DC (NO_CLIENT_SITE).'
         Fix = (Fx 'New-ADReplicationSubnet -Name ''<adres/maska>'' -Site ''<lokacja>''',
                   'Select-String -Path \\<DC>\admin$\debug\netlogon.log -Pattern NO_CLIENT_SITE | Select-Object -Last 20')
