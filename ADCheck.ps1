@@ -836,7 +836,7 @@ function Add-IfAny([hashtable]$F) {
 # Nazwy testów w konsoli
 $checkLabels = @{
     'PRIV' = 'Konta uprzywilejowane'; 'USERS' = 'Konta użytkowników'; 'COMPUTERS' = 'Komputery, systemy i LAPS'
-    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia do kont, grup i DC (Tier 0), delegacja do DC'
+    'COMP-OWNER' = 'Właściciele kont komputerów'; 'ACL' = 'Uprawnienia: domena, AdminSDHolder, GPO'; 'ACL-TIER0' = 'Uprawnienia Tier 0, delegacja do DC'
     'LAPS-ACL' = 'Dostęp do haseł LAPS'; 'KRB-ENC' = 'Kerberos: szyfrowanie DES/RC4'; 'DOMAIN' = 'Domena, las, hasła, DNS'
     'DC-OS' = 'Systemy kontrolerów domeny'; 'DC-GPO' = 'GPO kontrolerów domeny'; 'GPO-ALL' = 'GPO w całej domenie'; 'GPP' = 'Hasła w preferencjach GPO (SYSVOL)'
     'CIS' = 'Konfiguracja DC (CIS i Microsoft)'; 'DC-PATCH' = 'Aktualizacje kontrolerów domeny'; 'REPL' = 'Replikacja AD'
@@ -1317,7 +1317,7 @@ Invoke-Check 'PRIV' {
         }
     }
     foreach ($g in 'Schema Admins','Account Operators','Server Operators','Print Operators','Backup Operators','DnsAdmins','Key Admins','Enterprise Key Admins') {
-        if (-not $privGroups.ContainsKey($g)) { continue }
+        if (-not $privGroups.Contains($g)) { continue }
         Add-IfAny @{
             Id = "P-$($g -replace ' ','')"; Category = $catPriv; Severity = 'Medium'
             Title = "Grupa $g nie jest pusta"
