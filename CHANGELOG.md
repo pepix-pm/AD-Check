@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24 – 2026-11-07
+
+- Testy konfiguracji DC (DC-GPO, CIS, Microsoft Security Baseline) nie przerywają się, gdy konto przeglądu nie może odczytać jednego z GPO podpiętych do domeny lub OU Domain Controllers (np. przez filtrowanie zabezpieczeń). Takie GPO są pomijane i wymienione w nowym znalezisku INFO-GPO-READ z kodem błędu.
+- D-DNS-CREATECHILD: błąd odczytu stref DNS daje status „Błąd testu” zamiast fałszywego zaliczenia (pomijany jest tylko brak partycji/kontenera).
+- DC-NETSESSION pominięty przy koncie uprzywilejowanym ma status „Pominięty”, także gdy inne testy DC zgłosiły błąd.
+
 ## 0.23 – 2026-11-07
 
 - **D-GPP-PASSWORD** (Critical/High): hasła w preferencjach GPO w SYSVOL – `cpassword` (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) i hasło autologowania `DefaultPassword` w Registry.xml; wszystkie GPO, także niepodlinkowane. Raport pokazuje GPO, plik, element i konto, nigdy samo hasło.

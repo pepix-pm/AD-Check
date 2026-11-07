@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.23'
+$Version = '0.24'
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -933,6 +933,33 @@ function Test-Smb1([string]$Computer, [int]$TimeoutMs = 3000) {
 # Ustawienia bezpieczeństwa DC z GPO podlinkowanych do domeny i OU Domain Controllers (odczyt z SYSVOL).
 # Kolejność: najpierw domena, potem OU DC; w gPLink ostatni wpis = kolejność łącza 1, więc wygrywa późniejszy.
 # Uproszczenie: pomijane łącza wyłączone i GPO z wyłączoną częścią Komputer; flaga Enforced nie jest uwzględniana.
+# GPO domeny i OU Domain Controllers, których konto przeglądu nie mogło odczytać (zamiast przerywać testy DC)
+$gpoReadErrors = @{}
+function Get-ErrorText($Err) {
+    $e = $Err.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    "$($e.Message.Trim()) (0x$('{0:X8}' -f $e.HResult))"
+}
+# Odczyt GPO z gPLink kontenera; zwraca obiekty GPO z displayName, gPCFileSysPath, flags; błędy trafiają do $gpoReadErrors
+function Get-DcLinkedGpo {
+    foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
+        $gpLink = $null
+        try { $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink }
+        catch { $gpoReadErrors["gPLink: $container"] = Get-ErrorText $_; continue }
+        if (-not $gpLink) { continue }
+        foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
+            if ([int]$m.Groups[2].Value -band 1) { continue }
+            $dn = $m.Groups[1].Value
+            $gpo = $null
+            try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags }
+            catch { $gpoReadErrors[$dn] = Get-ErrorText $_; continue }
+            if (-not $gpo) { $gpoReadErrors[$dn] = 'obiekt GPO niewidoczny dla konta przeglądu (brak prawa odczytu lub GPO usunięte)'; continue }
+            if ($gpo.flags -band 2) { continue }
+            $gpo
+        }
+    }
+}
+
 function Get-DcGpoSettings {
     $keys = @{
         LDAPServerIntegrity       = 'MACHINE\System\CurrentControlSet\Services\NTDS\Parameters\LDAPServerIntegrity'
@@ -940,16 +967,12 @@ function Get-DcGpoSettings {
         LmCompatibilityLevel      = 'MACHINE\System\CurrentControlSet\Control\Lsa\LmCompatibilityLevel'
     }
     $result = @{}
-    foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
-        $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink
-        if (-not $gpLink) { continue }
-        foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
-            if ([int]$m.Groups[2].Value -band 1) { continue }
-            $gpo = Get-LdapObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags
-            if ($gpo.flags -band 2) { continue }
+    foreach ($gpo in @(Get-DcLinkedGpo)) {
             $inf = Join-Path $gpo.gPCFileSysPath 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
             if (-not (Test-Path -LiteralPath $inf)) { continue }
-            $content = Get-Content -LiteralPath $inf -Encoding Unicode
+            $content = $null
+            try { $content = Get-Content -LiteralPath $inf -Encoding Unicode -ErrorAction Stop }
+            catch { $gpoReadErrors["$($gpo.displayName): GptTmpl.inf"] = Get-ErrorText $_; continue }
             foreach ($k in $keys.Keys) {
                 $line = $content | Where-Object { $_ -like "$($keys[$k])=*" } | Select-Object -First 1
                 if ($line) {
@@ -957,7 +980,6 @@ function Get-DcGpoSettings {
                     $result[$k] = [pscustomobject]@{ Wartosc = [int]$val; Zrodlo = "GPO: $($gpo.displayName)" }
                 }
             }
-        }
     }
     $result
 }
@@ -1022,13 +1044,8 @@ function Resolve-SidName([string]$Sid) {
 # Registry: 'ścieżka\wartość' (małe litery, bez HKLM) -> {Wartosc, Zrodlo}; Rights: SeXxx -> {Wartosc = SID-y, Zrodlo}; Audit: GUID podkategorii -> {Wartosc 0-3, Zrodlo}
 function Get-DcGpoPolicy {
     $pol = [pscustomobject]@{ Registry = @{}; Rights = @{}; Audit = @{} }
-    foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
-        $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink
-        if (-not $gpLink) { continue }
-        foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
-            if ([int]$m.Groups[2].Value -band 1) { continue }
-            $gpo = Get-LdapObject -Identity $m.Groups[1].Value -Properties displayName, gPCFileSysPath, flags
-            if ($gpo.flags -band 2) { continue }
+    foreach ($gpo in @(Get-DcLinkedGpo)) {
+        try {
             $src  = "GPO: $($gpo.displayName)"
             $root = Join-Path $gpo.gPCFileSysPath 'Machine'
 
@@ -1064,7 +1081,7 @@ function Get-DcGpoPolicy {
                     if ($g) { $pol.Audit[$g] = [pscustomobject]@{ Wartosc = [int]$a.'Setting Value'; Zrodlo = $src } }
                 }
             }
-        }
+        } catch { $gpoReadErrors["$($gpo.displayName) ($($gpo.gPCFileSysPath))"] = Get-ErrorText $_ }
     }
     $pol
 }
@@ -2156,7 +2173,13 @@ Invoke-Check 'DOMAIN' {
     $wideDns = @{ 'S-1-5-11' = 'Authenticated Users'; 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon' }
     $dnsRows = foreach ($base in @("CN=MicrosoftDNS,DC=DomainDnsZones,$domainDn", "CN=MicrosoftDNS,DC=ForestDnsZones,$($rootDse.rootDomainNamingContext)", "CN=MicrosoftDNS,CN=System,$domainDn")) {
         $zones = @()
-        try { $zones = @(Find-Ldap -SearchBase $base -Scope OneLevel -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) } catch { $zones = @() }
+        try { $zones = @(Find-Ldap -SearchBase $base -Scope OneLevel -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) }
+        catch {
+            # partycja/kontener może nie istnieć (0x80072030) - to nie błąd; każdy inny błąd ma dać 'Błąd testu', a nie fałszywe zaliczenie
+            $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+            if ($e.HResult -ne -2147016656) { throw "Odczyt stref DNS z $base nie powiódł się: $(Get-ErrorText $_)" }
+            $zones = @()
+        }
         foreach ($z in $zones) {
             if ($z.name -in 'RootDNSServers', '..TrustAnchors' -or $z.ntsecuritydescriptor -isnot [System.DirectoryServices.ActiveDirectorySecurity]) { continue }
             $who = @($z.ntsecuritydescriptor.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
@@ -3279,6 +3302,16 @@ Add-IfAny @{
 }
 #endregion
 
+if ($gpoReadErrors.Count) {
+    Add-Finding @{
+        Id = 'INFO-GPO-READ'; Category = 'Błędy testów'; Severity = 'Info'
+        Title = "Nie odczytano $($gpoReadErrors.Count) GPO lub plików GPO podpiętych do domeny i OU Domain Controllers"
+        Objects = @($gpoReadErrors.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ Obiekt = $_; Blad = $gpoReadErrors[$_] } })
+        Description = 'Konto przeglądu nie mogło odczytać tych GPO (obiektu w AD lub plików w SYSVOL). Ich ustawienia nie zostały uwzględnione w testach konfiguracji DC (LDAP, NTLM, CIS, Microsoft Security Baseline) - wyniki tych testów mogą być niepełne. Przyczyną bywa filtrowanie zabezpieczeń GPO odbierające prawo odczytu zwykłym kontom.'
+        Recommendation = 'Sprawdzić uprawnienia wskazanych GPO (Authenticated Users lub Domain Computers powinny mieć co najmniej odczyt) albo powtórzyć przegląd kontem, które je widzi.'
+    }
+}
+
 #region ---------- dane referencyjne ----------
 # Tabele poprawek i cyklu życia są wpisane w skrypt; stara wersja skryptu może przeoczyć nowsze aktualizacje lub daty końca wsparcia.
 $refRows = @()
@@ -3340,8 +3373,8 @@ $ruleStatus = @(foreach ($r in $ruleCatalog) {
     $st = if ($f) { 'Znalezisko' }
           elseif ($r.W -and $SkipDCChecks) { 'Pominięty (-SkipDCChecks)' }
           elseif ($r.W -eq 'WinRM' -and -not $UseWinRM) { 'Wymaga -UseWinRM' }
-          elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
           elseif ($r.Id -eq 'DC-NETSESSION' -and $runAsPriv) { 'Pominięty (konto uprzywilejowane)' }
+          elseif (($errChecks -contains $r.C) -or ($r.C -eq 'DC-PROBE' -and $probeErr)) { 'Błąd testu' }
           elseif ($r.N -and ($foundIds -contains $r.N)) { 'Nie dotyczy' }
           else { 'Zaliczony' }
     [pscustomobject]@{
