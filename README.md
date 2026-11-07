@@ -1,4 +1,4 @@
-# AD-Check
+# ADCheck
 
 Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **zwykłym koncie domenowym**, bez instalacji agentów i bez narzędzi firm trzecich. Wynikiem jest szczegółowy raport HTML dla właściciela domeny i administratorów oraz dane JSON/CSV do porównań między przeglądami.
 
@@ -15,16 +15,16 @@ Skrypt sprawdza wymagania na starcie i wypisuje wszystkie braki naraz.
 
 ```powershell
 clear
-.\PEPIX-ADCheck.ps1 -Klient KLIENT
-.\PEPIX-ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
-.\PEPIX-ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
+.\ADCheck.ps1 -Klient KLIENT
+.\ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
+.\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
 ```
 
 | Parametr | Opis |
 |---|---|
 | `-Klient` | Nazwa organizacji w raporcie i w nazwie pliku (wymagany) |
 | `-Server` | Domena lub DC do odpytania (domyślnie domena bieżącego użytkownika) |
-| `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\PEPIX-ADCheck\raporty`) |
+| `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\ADCheck\raporty`) |
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
 | `-Previous` | JSON z poprzedniego przeglądu do porównania |
 | `-UseWinRM` | Testy DC z rejestru przez WinRM (wymaga admina na DC) |
@@ -54,31 +54,31 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 Repozytorium jest publiczne – token nie jest potrzebny. W środowisku produkcyjnym uruchamiaj **wyłącznie wydanie z tagiem i ze sprawdzeniem SHA256**. Wklej w PowerShellu na stacji w badanej domenie:
 
 ```powershell
-$v='v0.19'; $h='8F95814C31BFCB06AF892E1013A66A31F7CA076E972CC646CBC9B3851CD99A0F'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $b=(New-Object Net.WebClient).DownloadData("https://raw.githubusercontent.com/pepix-pm/AD-Check/$v/PEPIX-ADCheck.ps1"); if (([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)) -replace '-') -ne $h) { throw "SHA256 pobranego pliku nie zgadza się z wydaniem $v - skrypt NIE został uruchomiony" }; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b).TrimStart([char]0xFEFF))) -Klient KLIENT
+$v='v0.19'; $h='8F95814C31BFCB06AF892E1013A66A31F7CA076E972CC646CBC9B3851CD99A0F'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $b=(New-Object Net.WebClient).DownloadData("https://raw.githubusercontent.com/pepix-pm/ADCheck/$v/PEPIX-ADCheck.ps1"); if (([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)) -replace '-') -ne $h) { throw "SHA256 pobranego pliku nie zgadza się z wydaniem $v - skrypt NIE został uruchomiony" }; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
 
-- `$v` i `$h` to tag i SHA256 wydania (lista wydań: zakładka *Releases*). Skrypt uruchamia się tylko wtedy, gdy pobrany plik ma dokładnie ten hash – podmiana pliku lub tagu w repozytorium go zatrzyma.
+- `$v` i `$h` to tag i SHA256 wydania (lista wydań: zakładka *Releases*). W wydaniu v0.19 plik nazywa się jeszcze `PEPIX-ADCheck.ps1`; od następnego wydania `ADCheck.ps1` – zmień nazwę w adresie razem z `$v` i `$h`. Skrypt uruchamia się tylko wtedy, gdy pobrany plik ma dokładnie ten hash – podmiana pliku lub tagu w repozytorium go zatrzyma.
 - **Hash przechowuj poza GitHubem** (np. we własnej dokumentacji lub menedżerze haseł) i stamtąd kopiuj polecenie. Hash pobrany z tego samego repozytorium nie chroni przed przejęciem konta GitHub, bo atakujący zmieniłby oba.
 - Pierwsza część włącza TLS 1.2 – bez niej Windows Server 2012 R2/2016 nie połączy się z GitHubem („Nie można utworzyć bezpiecznego kanału SSL/TLS”). Na Windows 10/11 nie przeszkadza.
-- Uruchamianie kodu pobranego z sieci bez zapisu na dysk może wywołać alert EDR (zachowanie podobne do technik „fileless”). W organizacjach z EDR, AppLocker lub WDAC pobierz plik z wydania, sprawdź hash (`Get-FileHash .\PEPIX-ADCheck.ps1`) i uruchom go z dysku; przed przeglądem uprzedź zespół monitorujący bezpieczeństwo (SOC).
+- Uruchamianie kodu pobranego z sieci bez zapisu na dysk może wywołać alert EDR (zachowanie podobne do technik „fileless”). W organizacjach z EDR, AppLocker lub WDAC pobierz plik z wydania, sprawdź hash (`Get-FileHash .\ADCheck.ps1`) i uruchom go z dysku; przed przeglądem uprzedź zespół monitorujący bezpieczeństwo (SOC).
 
 Gałąź `main` służy wyłącznie do rozwoju i testów w laboratorium. Wersja nieoznaczona tagiem (np. do testu przed wydaniem):
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
 
 Sprawdzenie składni bez uruchamiania (np. po zmianach w repo):
 
 ```powershell
-$e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm https://raw.githubusercontent.com/pepix-pm/AD-Check/main/PEPIX-ADCheck.ps1).TrimStart([char]0xFEFF), [ref]$null, [ref]$e); $e | Format-List Message, @{n='Linia';e={$_.Extent.StartLineNumber}}, @{n='Kod';e={$_.Extent.Text}}
+$e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm https://raw.githubusercontent.com/pepix-pm/ADCheck/main/ADCheck.ps1).TrimStart([char]0xFEFF), [ref]$null, [ref]$e); $e | Format-List Message, @{n='Linia';e={$_.Extent.StartLineNumber}}, @{n='Kod';e={$_.Extent.Text}}
 ```
 
 Uwagi:
 - Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
 - `.TrimStart([char]0xFEFF)` usuwa znacznik BOM (plik musi go mieć, żeby PowerShell 5.1 z pliku poprawnie czytał polskie znaki). GitHub wysyła `charset=utf-8`, więc `irm` dekoduje polskie znaki poprawnie.
 - Wydanie (tag) powstaje dopiero po przetestowaniu wersji w środowisku testowym i w co najmniej jednym środowisku produkcyjnym. Tagi i gałąź `main` są chronione przed nadpisaniem i usunięciem.
-- Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Jeśli przekazujesz je dalej, rób to szyfrowanym kanałem, a potem usuń je ze stacji.
+- Raporty powstają w `%USERPROFILE%\ADCheck\raporty`. Jeśli przekazujesz je dalej, rób to szyfrowanym kanałem, a potem usuń je ze stacji.
 - Zgłaszając błąd lub propozycję zmiany, nie wklejaj fragmentów raportu: nazwy domen, kont, serwerów i wyniki to dane wrażliwe badanej organizacji.
 
 ## Wyniki

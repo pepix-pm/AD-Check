@@ -1,6 +1,6 @@
 ﻿# Testy jednostkowe funkcji niezależnych od AD (Pester 5). Uruchomienie: Invoke-Pester .\tests
 BeforeAll {
-    $scriptPath = Join-Path $PSScriptRoot '..\PEPIX-ADCheck.ps1'
+    $scriptPath = Join-Path $PSScriptRoot '..\ADCheck.ps1'
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
     $script:parseErrors = $errors

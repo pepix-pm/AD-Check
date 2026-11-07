@@ -1,9 +1,9 @@
 ﻿<#
 .SYNOPSIS
-    AD-Check — przegląd bezpieczeństwa Active Directory
+    ADCheck — przegląd bezpieczeństwa Active Directory
 
 .DESCRIPTION
-    Uruchamiać ze stacji w domenie klienta. Nie wymaga RSAT: AD odczytywane przez LDAP (System.DirectoryServices).
+    Uruchamiać ze stacji w badanej domenie (lub z -Server). Nie wymaga RSAT: AD odczytywane przez LDAP (System.DirectoryServices).
     Domyślnie WYSTARCZY ZWYKŁE KONTO DOMENOWE:
       - dane katalogowe: zapytania LDAP,
       - Print Spooler na DC: test potoku \\DC\pipe\spoolss,
@@ -20,7 +20,7 @@
     .\ADCheck.ps1 -Klient KLIENT -Server firma.local -UseWinRM
     .\ADCheck.ps1 -Klient KLIENT -Previous .\raporty\AD_KLIENT_firma.local_20260101-1200.json
     .\ADCheck.ps1 -Klient KLIENT -Silent   # bez komunikatów w konsoli; zwraca obiekt ze ścieżkami raportu i wynikiem
-    # bez kopiowania pliku na serwer (z prywatnego repo GitHub) - patrz README, sekcja "Uruchomienie z GitHuba"
+    # bez kopiowania pliku na serwer (z wydania na GitHubie, z weryfikacją SHA256) - patrz README, sekcja "Uruchomienie z GitHuba"
 #>
 [CmdletBinding()]
 param(
@@ -44,7 +44,7 @@ function Write-Step([string]$Text = '', [string]$Color = 'Gray', [switch]$NoNewl
     if ($Silent) { return }
     Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
 }
-Write-Step "PEPIX AD-Check $Version | klient: $Klient | domena: $Server | konto: $env:USERDOMAIN\$env:USERNAME" 'Cyan'
+Write-Step "ADCheck $Version | klient: $Klient | domena: $Server | konto: $env:USERDOMAIN\$env:USERNAME" 'Cyan'
 Write-Step 'Sprawdzanie wymagań i połączenia z domeną...'
 
 #region ---------- wymagania ----------
@@ -80,13 +80,13 @@ if ($braki.Count -eq 0) {
     }
 }
 if ($braki.Count -gt 0) {
-    throw ("Niespełnione wymagania PEPIX AD-Check:`n - " + ($braki -join "`n - "))
+    throw ("Niespełnione wymagania ADCheck:`n - " + ($braki -join "`n - "))
 }
 Write-Step "  połączono z $($rootDse.dnsHostName) ($($rootDse.defaultNamingContext))" 'Green'
 
 if (-not $OutDir) {
     # z pliku: obok skryptu; z GitHuba: profil użytkownika (nie bieżący katalog - w sesji admina to często System32)
-    $OutDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'raporty' } else { Join-Path $env:USERPROFILE 'PEPIX-ADCheck\raporty' }
+    $OutDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'raporty' } else { Join-Path $env:USERPROFILE 'ADCheck\raporty' }
 }
 # Pliki wynikowe z BOM (Excel i przeglądarki poprawnie pokazują polskie znaki); w PS 6+ 'UTF8' oznacza UTF-8 bez BOM
 $encOut = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
@@ -3451,7 +3451,7 @@ $logoB64 = 'iVBORw0KGgoAAAANSUhEUgAAAcsAAAClCAYAAAAzi9bZAAArZElEQVR42u2dB3gU1drH
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.Append("<div class=`"wrap`"><header><div class=`"hd`"><img class=`"logo`" alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`"><div class=`"ht`"><h1>Przegląd bezpieczeństwa Active Directory</h1>")
 [void]$sb.Append("<p><b>Klient:</b> $(HtmlEnc $Klient) &nbsp;|&nbsp; <b>Domena:</b> $(HtmlEnc $domain.DNSRoot) &nbsp;|&nbsp; <b>Data:</b> $($now.ToString('dd.MM.yyyy HH:mm'))</p>")
-[void]$sb.Append("<p><b>Wykonał:</b> $(HtmlEnc $meta.Uruchomil)$(if ($runAsPriv) { ' (konto uprzywilejowane)' }) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; PEPIX AD-Check $Version</p></div></div>")
+[void]$sb.Append("<p><b>Wykonał:</b> $(HtmlEnc $meta.Uruchomil)$(if ($runAsPriv) { ' (konto uprzywilejowane)' }) ze stacji $(HtmlEnc $env:COMPUTERNAME) &nbsp;|&nbsp; <b>Testy DC:</b> $(HtmlEnc $dcMethod) &nbsp;|&nbsp; ADCheck $Version</p></div></div>")
 [void]$sb.Append('<div class="conf">DOKUMENT POUFNY - zawiera informacje o podatnościach infrastruktury klienta</div></header>')
 
 function Get-ScoreClass([int]$Points) { if ($Points -ge 30) { 'r3' } elseif ($Points -ge 10) { 'r2' } elseif ($Points -ge 1) { 'r1' } else { 'r0' } }
@@ -3587,7 +3587,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('</section>')
 
 [void]$sb.Append('<section><h2>Załącznik B. Metodyka i ograniczenia</h2><p>')
-[void]$sb.Append('Przegląd wykonano narzędziem PEPIX AD-Check na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
+[void]$sb.Append('Przegląd wykonano narzędziem ADCheck na podstawie odczytu katalogu Active Directory (LDAP), metadanych replikacji, ustawień zasad grupy z SYSVOL oraz nieinwazyjnych testów sieciowych kontrolerów domeny (porty usług, udziały, czas NTP, rekordy DNS). ')
 [void]$sb.Append('Punktacja: Critical 25, High 10, Medium 3, Low 1 pkt za znalezisko; wynik obszaru to suma punktów (maks. 100), wynik ogólny to najgorszy obszar. Poziom dojrzałości (1-5) wynika z najpoważniejszego znaleziska. ')
 [void]$sb.Append('Konfigurację DC porównano z wybranymi kontrolami CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny) oraz z Microsoft Security Baseline dla Windows Server 2025 (profil Domain Controller) - nie jest to pełna ocena zgodności z żadnym z nich. ')
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder i GPO domeny/DC - usług certyfikatów (ADCS) ani stacji końcowych. ')
@@ -3595,7 +3595,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
 [void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe: przed wykonaniem należy sprawdzić ich skutki w środowisku testowym i wprowadzać je zgodnie z zasadami zarządzania zmianami w organizacji.')
 [void]$sb.Append('</p></section>')
-[void]$sb.Append("<footer><img alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`">PEPIX AD-Check $Version &nbsp;|&nbsp; $($now.ToString('dd.MM.yyyy')) &nbsp;|&nbsp; pepix.pl</footer></div>")
+[void]$sb.Append("<footer><img alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`">ADCheck $Version &nbsp;|&nbsp; $($now.ToString('dd.MM.yyyy')) &nbsp;|&nbsp; pepix.pl</footer></div>")
 
 ConvertTo-Html -Head $css -Title "AD $Klient $($now.ToString('yyyy-MM-dd'))" -Body $sb.ToString() | Set-Content "$base.html" -Encoding $encOut
 #endregion
