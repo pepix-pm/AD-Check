@@ -1,6 +1,6 @@
 # PEPIX AD-Check
 
-Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **zwykłym koncie domenowym**, bez instalacji agentów i bez narzędzi firm trzecich. Wynikiem jest szczegółowy raport HTML gotowy do przekazania klientowi oraz dane JSON/CSV do porównań między przeglądami.
+Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **zwykłym koncie domenowym**, bez instalacji agentów i bez narzędzi firm trzecich. Wynikiem jest szczegółowy raport HTML dla właściciela domeny i administratorów oraz dane JSON/CSV do porównań między przeglądami.
 
 ## Wymagania
 
@@ -22,7 +22,7 @@ clear
 
 | Parametr | Opis |
 |---|---|
-| `-Klient` | Nazwa klienta w raporcie i nazwie pliku (wymagany) |
+| `-Klient` | Nazwa organizacji w raporcie i w nazwie pliku (wymagany) |
 | `-Server` | Domena lub DC do odpytania (domyślnie domena bieżącego użytkownika) |
 | `-OutDir` | Katalog wyników (domyślnie `.\raporty` obok skryptu; przy uruchomieniu z GitHuba `%USERPROFILE%\PEPIX-ADCheck\raporty`) |
 | `-StaleDays` | Próg nieaktywności kont w dniach (domyślnie 90) |
@@ -36,12 +36,12 @@ clear
 
 Skrypt nie wymaga RSAT ani uprawnień administratora na stacji – wystarczy zwykły PowerShell.
 
-**Stacja w domenie klienta** – zaloguj się kontem domenowym i uruchom bez `-Server`.
+**Stacja w badanej domenie** – zaloguj się kontem domenowym i uruchom bez `-Server`.
 
-**Stacja spoza domeny klienta** (np. laptop PEPIX w sieci klienta lub przez VPN):
+**Stacja spoza badanej domeny** (np. komputer audytora podłączony do sieci organizacji lub przez VPN):
 
-1. DNS stacji musi rozwiązywać domenę klienta (serwery DNS = DC klienta), bo przez nazwę domeny odczytywany jest m.in. SYSVOL.
-2. Uruchom PowerShell z poświadczeniami domeny klienta – bez dołączania stacji do domeny:
+1. DNS stacji musi rozwiązywać badaną domenę (serwery DNS = kontrolery tej domeny), bo przez nazwę domeny odczytywany jest m.in. SYSVOL.
+2. Uruchom PowerShell z poświadczeniami badanej domeny – bez dołączania stacji do domeny:
    ```powershell
    runas /netonly /user:FIRMA\uzytkownik powershell.exe
    ```
@@ -51,16 +51,16 @@ W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie k
 
 ## Uruchomienie z GitHuba (bez kopiowania pliku)
 
-Repozytorium jest publiczne – token nie jest potrzebny. U klienta uruchamiaj **wyłącznie wydanie z tagiem i ze sprawdzeniem SHA256**. Wklej w PowerShellu na stacji w domenie klienta:
+Repozytorium jest publiczne – token nie jest potrzebny. W środowisku produkcyjnym uruchamiaj **wyłącznie wydanie z tagiem i ze sprawdzeniem SHA256**. Wklej w PowerShellu na stacji w badanej domenie:
 
 ```powershell
 $v='v0.19'; $h='8F95814C31BFCB06AF892E1013A66A31F7CA076E972CC646CBC9B3851CD99A0F'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $b=(New-Object Net.WebClient).DownloadData("https://raw.githubusercontent.com/pepix-pm/AD-Check/$v/PEPIX-ADCheck.ps1"); if (([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)) -replace '-') -ne $h) { throw "SHA256 pobranego pliku nie zgadza się z wydaniem $v - skrypt NIE został uruchomiony" }; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b).TrimStart([char]0xFEFF))) -Klient KLIENT
 ```
 
 - `$v` i `$h` to tag i SHA256 wydania (lista wydań: zakładka *Releases*). Skrypt uruchamia się tylko wtedy, gdy pobrany plik ma dokładnie ten hash – podmiana pliku lub tagu w repozytorium go zatrzyma.
-- **Hash przechowuj poza GitHubem** (np. w instrukcji wewnętrznej PEPIX) i stamtąd kopiuj polecenie. Hash pobrany z tego samego repozytorium nie chroni przed przejęciem konta GitHub, bo atakujący zmieniłby oba.
+- **Hash przechowuj poza GitHubem** (np. we własnej dokumentacji lub menedżerze haseł) i stamtąd kopiuj polecenie. Hash pobrany z tego samego repozytorium nie chroni przed przejęciem konta GitHub, bo atakujący zmieniłby oba.
 - Pierwsza część włącza TLS 1.2 – bez niej Windows Server 2012 R2/2016 nie połączy się z GitHubem („Nie można utworzyć bezpiecznego kanału SSL/TLS”). Na Windows 10/11 nie przeszkadza.
-- Uruchamianie kodu pobranego z sieci bez zapisu na dysk może wywołać alert EDR (zachowanie podobne do technik „fileless”). W organizacjach z EDR, AppLocker lub WDAC pobierz plik z wydania, sprawdź hash (`Get-FileHash .\PEPIX-ADCheck.ps1`) i uruchom go z dysku; przed przeglądem uprzedź SOC klienta.
+- Uruchamianie kodu pobranego z sieci bez zapisu na dysk może wywołać alert EDR (zachowanie podobne do technik „fileless”). W organizacjach z EDR, AppLocker lub WDAC pobierz plik z wydania, sprawdź hash (`Get-FileHash .\PEPIX-ADCheck.ps1`) i uruchom go z dysku; przed przeglądem uprzedź zespół monitorujący bezpieczeństwo (SOC).
 
 Gałąź `main` służy wyłącznie do rozwoju i testów w laboratorium. Wersja nieoznaczona tagiem (np. do testu przed wydaniem):
 
@@ -77,9 +77,9 @@ $e=$null; [void][System.Management.Automation.Language.Parser]::ParseInput((irm 
 Uwagi:
 - Dlaczego nie `iex (irm ...)`: `iex` nie przyjmuje parametrów (`-Klient`, `-UseWinRM`…), a do tego wykonuje skrypt w bieżącej sesji – zostawia w niej zmienne skryptu i `$ErrorActionPreference = 'Stop'`. Scriptblock przyjmuje parametry i działa we własnym zakresie. Oba sposoby omijają ExecutionPolicy i nie zapisują skryptu na dysku.
 - `.TrimStart([char]0xFEFF)` usuwa znacznik BOM (plik musi go mieć, żeby PowerShell 5.1 z pliku poprawnie czytał polskie znaki). GitHub wysyła `charset=utf-8`, więc `irm` dekoduje polskie znaki poprawnie.
-- Wydanie (tag) powstaje dopiero po przetestowaniu wersji w środowisku testowym i u co najmniej jednego klienta. Tagi i gałąź `main` są chronione przed nadpisaniem i usunięciem.
-- Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Po przekazaniu ich szyfrowanym kanałem usuń je ze stacji.
-- **Repozytorium jest publiczne** – tym bardziej obowiązuje zasada: żadnych nazw klientów, domen, kont ani wyników w repo.
+- Wydanie (tag) powstaje dopiero po przetestowaniu wersji w środowisku testowym i w co najmniej jednym środowisku produkcyjnym. Tagi i gałąź `main` są chronione przed nadpisaniem i usunięciem.
+- Raporty powstają w `%USERPROFILE%\PEPIX-ADCheck\raporty`. Jeśli przekazujesz je dalej, rób to szyfrowanym kanałem, a potem usuń je ze stacji.
+- Zgłaszając błąd lub propozycję zmiany, nie wklejaj fragmentów raportu: nazwy domen, kont, serwerów i wyniki to dane wrażliwe badanej organizacji.
 
 ## Wyniki
 
@@ -99,12 +99,12 @@ W katalogu `raporty` powstają pliki `AD_<klient>_<domena>_<data>`:
 - **Macierz ryzyka** pokazuje punkty w podziale obszar × rodzaj ryzyka (np. „Łamanie haseł”, „Pass-the-hash”, „Replikacja i kondycja”).
 - **Sprawdzone reguły** – status każdego testu: znalezisko, zaliczony, nie dotyczy, pominięty, wymaga `-UseWinRM`, błąd testu.
 
-- **Plan naprawczy** – znaleziska w trzech etapach (do 30 dni / 30–90 dni / do 12 miesięcy) z szacunkiem pracochłonności i uwagami (zależności, kolejność). Znaleziska krytyczne zawsze w etapie 1. Szacunki są w tabeli `$planMeta` w skrypcie – do dostosowania do realnych czasów PEPIX.
+- **Plan naprawczy** – znaleziska w trzech etapach (do 30 dni / 30–90 dni / do 12 miesięcy) z szacunkiem pracochłonności i uwagami (zależności, kolejność). Znaleziska krytyczne zawsze w etapie 1. Szacunki są w tabeli `$planMeta` w skrypcie – warto je dostosować do własnych doświadczeń z wdrożeń.
 - **Odniesienie do NIS2 / UKSC i ISO/IEC 27001:2022** – każde znalezisko jest przypisane (przez rodzaj ryzyka, `$complianceMap`) do środków z art. 21 ust. 2 NIS2 (wdrożonych w UKSC, Dz. U. 2026 poz. 252) i zabezpieczeń z załącznika A ISO 27001. Raport pokazuje dla każdego środka liczbę testów AD, znaleziska i punkty. To wskazanie, których wymagań dotyczą problemy techniczne – nie ocena zgodności.
 
-Obszar, rodzaj ryzyka i test źródłowy każdej reguły są w katalogu `$ruleCatalog` w skrypcie. Układ raportu jest wzorowany na przeglądach typu PingCastle; teksty, identyfikatory i punktacja są własne PEPIX.
+Obszar, rodzaj ryzyka i test źródłowy każdej reguły są w katalogu `$ruleCatalog` w skrypcie. Układ raportu jest wzorowany na przeglądach typu PingCastle; teksty, identyfikatory i punktacja są własne.
 
-> **Raporty zawierają informacje o podatnościach klienta.** Nie commituj ich do repozytorium (są w `.gitignore`) i przekazuj tylko szyfrowanym kanałem.
+> **Raporty zawierają informacje o podatnościach badanej organizacji.** Przechowuj je i przekazuj jak dane poufne (szyfrowany kanał, ograniczony dostęp).
 
 ## Jak sprawdzane są kontrolery domeny bez uprawnień admina
 
@@ -253,11 +253,11 @@ Testy (Pester 5) ładują z pliku skryptu wyłącznie definicje funkcji niezale�
 
 ## Ograniczenia
 
-Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze usług certyfikatów (ADCS) ani stacji końcowych. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder i GPO podpiętych do domeny i OU Domain Controllers – nie na pojedynczych kontach, grupach, OU i komputerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe; przed wykonaniem wymagają weryfikacji i zgłoszenia zmiany.
+Narzędzie nie zastępuje testów penetracyjnych. Nie analizuje jeszcze usług certyfikatów (ADCS) ani stacji końcowych. Uprawnienia (ACL) sprawdza na obiekcie domeny (w tym DCSync), AdminSDHolder i GPO podpiętych do domeny i OU Domain Controllers – nie na pojedynczych kontach, grupach, OU i komputerach. Ocena GPO nie uwzględnia flagi Enforced, blokowania dziedziczenia, filtrowania zabezpieczeń ani filtrów WMI. Nieaktywność kont opiera się na `lastLogonTimestamp` (dokładność ok. 14 dni). Polecenia naprawcze w raporcie są przykładowe: przed wykonaniem sprawdź ich skutki w środowisku testowym i wprowadzaj je zgodnie z zasadami zarządzania zmianami w organizacji.
 
 ## Zgoda na badanie i ślad w środowisku
 
-Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie jest pisemna zgoda jego właściciela** (np. umowa lub zlecenie przeglądu z określonym zakresem i terminem).
+Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie jest pisemna zgoda jego właściciela** (np. umowa lub zlecenie przeglądu z określonym zakresem i terminem). Administrator badający własną domenę również powinien mieć zgodę przełożonych lub osoby odpowiedzialnej za bezpieczeństwo.
 
 „Tylko odczyt” znaczy, że skrypt niczego nie zmienia – nie znaczy, że jest niewidoczny. Wykonuje:
 
@@ -267,7 +267,7 @@ Narzędzie wolno uruchamiać **wyłącznie w środowisku, na którego badanie je
 - odczyt dziennika zdarzeń DC (bilety Kerberos z DES/RC4), jeśli konto ma do niego dostęp,
 - w trybie `-UseWinRM`: zdalne odczyty rejestru i usług na DC.
 
-Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z klientem i uprzedź jego SOC.
+Te operacje mogą trafić do logów DC i SIEM oraz wywołać alerty (np. Microsoft Defender for Identity: rozpoznanie przez LDAP, wyliczanie sesji SMB) lub zostać zablokowane przez zaporę. Uzgodnij termin przeglądu z właścicielem środowiska i uprzedź zespół monitorujący bezpieczeństwo (SOC).
 
 `-UseWinRM` nie przyjmuje haseł: używa tożsamości Kerberos bieżącej sesji (np. po `runas /netonly`). Poświadczenia nie trafiają do raportu, plików wynikowych ani konsoli; na DC zostaje zwykły ślad logowania sieciowego (zdarzenie 4624, typ 3) i – jeśli włączone – rejestrowanie poleceń PowerShell.
 

@@ -607,7 +607,7 @@ $complianceMap = @{
 # ---------- plan naprawczy: pracochłonność i etap ----------
 # Id -> @(godziny min, godziny max, etap, uwaga). Etap 1 = do 30 dni, 2 = 30-90 dni (wymaga testów), 3 = do 12 miesięcy (projekty).
 # Znalezisko Critical zawsze trafia do etapu 1. Godziny: przygotowanie, wdrożenie i weryfikacja w typowej domenie (do ok. 500 kont);
-# bez zakupów, licencji i migracji pojedynczych stacji. Szacunki do dostosowania do realnych czasów PEPIX.
+# bez zakupów, licencji i migracji pojedynczych stacji. Szacunki do dostosowania do własnych doświadczeń z wdrożeń.
 $planMeta = @{
     'U-STALE'          = @(2, 4, 1, 'Lista do potwierdzenia z klientem przed wyłączeniem')
     'C-STALE'          = @(1, 3, 1, '')
@@ -3593,7 +3593,7 @@ foreach ($r in @($ruleStatus | Sort-Object Obszar, Model, Id)) {
 [void]$sb.Append('Przegląd nie obejmuje testów penetracyjnych, pełnej analizy uprawnień (ACL) - sprawdzane są obiekt domeny, AdminSDHolder i GPO domeny/DC - usług certyfikatów (ADCS) ani stacji końcowych. ')
 [void]$sb.Append("Wersje systemów ustalono z atrybutów operatingSystem/operatingSystemVersion kont komputerów (bez łączenia się z komputerami); daty końca wsparcia według Microsoft Lifecycle, stan na $osLifecycleAsOf. ")
 [void]$sb.Append("Za nieaktywne uznano konta bez logowania od $StaleDays dni (atrybut lastLogonTimestamp, dokładność do ok. 14 dni). ")
-[void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe i wymagają weryfikacji oraz zgłoszenia zmiany przed wykonaniem.')
+[void]$sb.Append('Wartości odczytane z GPO opisują konfigurację zamierzoną; ustawienia lokalne na DC mogą się od niej różnić. Polecenia naprawcze są przykładowe: przed wykonaniem należy sprawdzić ich skutki w środowisku testowym i wprowadzać je zgodnie z zasadami zarządzania zmianami w organizacji.')
 [void]$sb.Append('</p></section>')
 [void]$sb.Append("<footer><img alt=`"PEPIX`" src=`"data:image/png;base64,$logoB64`">PEPIX AD-Check $Version &nbsp;|&nbsp; $($now.ToString('dd.MM.yyyy')) &nbsp;|&nbsp; pepix.pl</footer></div>")
 

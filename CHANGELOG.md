@@ -4,6 +4,7 @@
 
 - Postęp w konsoli: połączenie z domeną, dane bazowe (liczba DC i kont uprzywilejowanych), każdy test z wynikiem (OK / liczba znalezisk i najwyższa waga / błąd) i czasem, zapis raportu, łączny czas przeglądu.
 - `-Silent`: bez komunikatów w konsoli; skrypt zwraca obiekt (Klient, Domena, Wynik, Dojrzalosc, Critical, High, Raport, Json, Csv, CzasSek) do użycia w skryptach.
+- Metodyka w raporcie: neutralne sformułowanie o wprowadzaniu poleceń naprawczych (test skutków, zasady zarządzania zmianami organizacji).
 
 ## 0.21 – 2026-11-07
 
