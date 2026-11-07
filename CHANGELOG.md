@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23 – 2026-11-07
+
+- **D-GPP-PASSWORD** (Critical/High): hasła w preferencjach GPO w SYSVOL – `cpassword` (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) i hasło autologowania `DefaultPassword` w Registry.xml; wszystkie GPO, także niepodlinkowane. Raport pokazuje GPO, plik, element i konto, nigdy samo hasło.
+- **P-DnsAdmins** (Medium): niepusta grupa DnsAdmins; jej członkowie są traktowani jak konta uprzywilejowane we wszystkich testach (grupa wyszukiwana po nazwie, bo nie ma stałego SID).
+- **P-GPCO** (Low): konta spoza administratorów w Group Policy Creator Owners.
+- Znaleziska ACL (D-DCSYNC, D-ACL-DOMAIN, D-ACL-ADMINSDHOLDER, D-ACL-GPO): kolumna Czlonkowie – aktywne konta, które efektywnie (rekursywnie) mają prawo nadane grupie.
+- Konto LDAP: skrypt pyta serwer, jakim kontem się uwierzytelnił (LDAP Who am I). Przy `runas /netonly` nagłówek raportu pokazuje osobno konto procesu i konto LDAP; ocena „konto uprzywilejowane” dotyczy konta LDAP.
+- Zakres oceny pod wynikiem: liczba ocenionych reguł i nieocenionych (wymaga -UseWinRM, pominięte, błąd testu).
+- INFO-REFDATA: ostrzeżenie w raporcie i konsoli, gdy wzorzec poprawek DC ma ponad 45 dni lub daty cyklu życia ponad 120 dni.
+- Poprawki: P-STALE nie zgłasza kont utworzonych w ostatnich `-StaleDays` dniach; DC-UNKNOWN odróżnia testy pominięte celowo od nierozstrzygniętych; raport HTML5 bez pustej tabeli na końcu; neutralne sformułowania w zaleceniach (bez wewnętrznych procesów i nazw narzędzi).
+
 ## 0.22 – 2026-11-07
 
 - Postęp w konsoli: połączenie z domeną, dane bazowe (liczba DC i kont uprzywilejowanych), każdy test z wynikiem (OK / liczba znalezisk i najwyższa waga / błąd) i czasem, zapis raportu, łączny czas przeglądu.

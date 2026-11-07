@@ -47,7 +47,7 @@ Skrypt nie wymaga RSAT ani uprawnień administratora na stacji – wystarczy zwy
    ```
 3. W nowym oknie podaj domenę jawnie: `& $adcheck -Klient KLIENT -Server firma.local`.
 
-W tym trybie pole „Wykonał” w raporcie pokazuje lokalne konto stacji, nie konto domenowe użyte do odczytu.
+Raport pokazuje wtedy osobno konto procesu („Uruchomił”) i konto, którym skrypt uwierzytelnił się do LDAP („Konto LDAP”, ustalane zapytaniem LDAP *Who am I*). Ocena, czy przegląd wykonano kontem uprzywilejowanym, dotyczy konta LDAP.
 
 ## Uruchomienie z GitHuba (bez kopiowania pliku)
 
@@ -131,6 +131,8 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-SPN | High | Konta uprzywilejowane z SPN | T1558.003 |
 | P-DA-COUNT | Medium | Więcej niż 5 członków Domain Admins | T1078.002 |
 | P-SchemaAdmins, P-AccountOperators, P-ServerOperators, P-PrintOperators, P-BackupOperators | Medium | Niepuste grupy wysokiego ryzyka | T1078.002 |
+| P-DnsAdmins | Medium | Niepusta grupa DnsAdmins (wykonanie kodu na DC przez usługę DNS); członkowie traktowani jak konta uprzywilejowane | T1078.002 |
+| P-GPCO | Low | Konta spoza administratorów w Group Policy Creator Owners | T1484.001 |
 | P-DELEG | Medium | Konta uprzywilejowane bez ochrony przed delegacją | T1558 |
 | P-STALE | Medium | Nieużywane aktywne konta uprzywilejowane | T1078.002 |
 | P-ADM500 | Medium | Wiek hasła wbudowanego Administratora | T1078.002 |
@@ -181,6 +183,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | D-GPO-LLMNR | Medium | Żadne podlinkowane GPO nie wyłącza LLMNR | T1557.001 |
 | D-GPO-HARDPATH | Medium / Low | GPO osłabia Hardened UNC Paths dla SYSVOL/NETLOGON lub ich brak przy starszych systemach | T1557 |
 | D-GPO-PSLOG | Low | Żadne podlinkowane GPO nie włącza Script Block Logging | T1059.001 |
+| D-GPP-PASSWORD | Critical / High | Hasła w preferencjach GPO w SYSVOL: `cpassword` (Critical, odszyfrowywalne przez każdego) lub hasło autologowania jawnym tekstem (High); wszystkie GPO, także niepodlinkowane; raport nie zawiera haseł | T1552.006 |
 | DC-OS-EOL | High | DC z systemem bez wsparcia | T1210 |
 | DC-SPOOLER | High | Print Spooler na DC | T1187 |
 | DC-SMB1 | High | SMBv1 na DC | T1210 |
