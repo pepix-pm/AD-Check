@@ -9,6 +9,7 @@ Poprawki po pierwszym przebiegu 0.18 w środowisku produkcyjnym:
 - DC-SUBNET: osobny tytuł, gdy w AD nie ma żadnej podsieci; opis uwzględnia liczbę lokacji.
 - C-OWNER: obiekty, których właściciela nie udało się odczytać, zgłaszane jako Info (C-OWNER-UNKNOWN) zamiast pomijane po cichu.
 - Poprawiona odmiana w opisie C-LAPS-MISSING.
+- DC-NTLMV1: dla nieustawionego LmCompatibilityLevel podana wartość domyślna (3) i jej skutek. DC-CIS-SUMMARY: w tytule liczba ustawień nieocenionych.
 - DC-NETSESSION pomijany (z adnotacją w „Testy DC nierozstrzygnięte”), gdy przegląd uruchomiono kontem uprzywilejowanym – administrator zawsze widzi sesje, więc wynik byłby fałszywie dodatni. Na liście reguł ma status „Pominięty (konto uprzywilejowane)”, a nagłówek raportu informuje o uruchomieniu kontem uprzywilejowanym.
 
 ## 0.18 – 2026-11-06

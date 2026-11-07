@@ -1991,7 +1991,7 @@ public static class PepixNetApi {
             if ($st.Cbt  -ne 2) { $dcCbt.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Cbt $mapCbt); Zrodlo = $st.CbtSrc }) }
             # Windows Server 2025 nie obsługuje już NTLMv1 - pomijamy
             if ($dc.OperatingSystem -notmatch '2025' -and ($null -eq $st.Lm -or $st.Lm -lt 5)) {
-                $dcNtlm.Add([pscustomobject]@{ DC = $h; Wartosc = (Show-Val $st.Lm $mapLm); Zrodlo = $st.LmSrc })
+                $dcNtlm.Add([pscustomobject]@{ DC = $h; Wartosc = $(if ($null -eq $st.Lm) { 'nieustawione (domyślnie 3: DC przyjmuje LM, NTLMv1 i NTLMv2)' } else { Show-Val $st.Lm $mapLm }); Zrodlo = $st.LmSrc })
             }
 
             # Sondy behawioralne (zwykłe konto, bez zmian na DC) - każda we własnym try, żeby błąd sondy nie przerywał testów DC
@@ -2369,7 +2369,7 @@ if (-not $SkipDCChecks) {
         $pct       = if ($evaluated.Count) { [int](100 * $okCount / $evaluated.Count) } else { 0 }
         Add-Finding @{
             Id = 'DC-CIS-SUMMARY'; Category = $catCis; Severity = 'Info'
-            Title = "Zgodność DC z wybranymi kontrolami CIS L1: $okCount z $($evaluated.Count) ($pct%)"
+            Title = "Zgodność DC z wybranymi kontrolami CIS L1: $okCount z $($evaluated.Count) ($pct%)$(if ($cisRows.Count -gt $evaluated.Count) { "; nie oceniono: $($cisRows.Count - $evaluated.Count)" })"
             Objects = $cisRows
             Description = "Pełna lista sprawdzonych ustawień ze statusem. Kontrole wybrane na podstawie CIS Microsoft Windows Server Benchmark (profil L1, kontroler domeny); nie jest to pełna ocena zgodności z CIS. $gpoNote"
         }
