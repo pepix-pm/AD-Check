@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25 – 2026-11-07
+
+- Poprawka regresji z 0.24: błąd odczytu stref DNS przerywał cały test domeny (Kosz AD, polityka haseł, dSHeuristics, zaufania). Test stref DNS ma teraz własną obsługę błędu (ERR-DNS-ZONES) i oznacza jako „Błąd testu” tylko D-DNS-CREATECHILD.
+- Strefy DNS wyszukiwane od korzenia partycji (DomainDnsZones, ForestDnsZones, CN=System), a GPO domeny i DC jednym wyszukiwaniem w CN=Policies. Obiekt, którego konto nie może czytać, nie przerywa już odczytu błędem 0x8007200A, tylko jest pomijany i raportowany.
+- INFO-GPO-READ: wyjaśnienie skutku (GPO bez prawa odczytu dla Authenticated Users / Domain Computers może nie być stosowane na komputerach, MS16-072) i polecenia do sprawdzenia uprawnień.
+
 ## 0.24 – 2026-11-07
 
 - Testy konfiguracji DC (DC-GPO, CIS, Microsoft Security Baseline) nie przerywają się, gdy konto przeglądu nie może odczytać jednego z GPO podpiętych do domeny lub OU Domain Controllers (np. przez filtrowanie zabezpieczeń). Takie GPO są pomijane i wymienione w nowym znalezisku INFO-GPO-READ z kodem błędu.

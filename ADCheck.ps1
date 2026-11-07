@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '0.24'
+$Version = '0.25'
 $runTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Komunikaty postępu w konsoli; -Silent wyłącza wszystkie
@@ -559,7 +559,7 @@ $ruleCatalog = @(
     @{ Id = 'C-OWNER';           O = 'A'; M = 'Delegacja';                    C = 'COMP-OWNER';   T = 'Komputery z właścicielem spoza administratorów' }
     @{ Id = 'D-PREWIN2000';      O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'Szerokie grupy w Pre-Windows 2000 Compatible Access' }
     @{ Id = 'D-DSHEURISTICS';    O = 'A'; M = 'Uprawnienia domyślne';         C = 'DOMAIN';       T = 'dSHeuristics osłabia zabezpieczenia' }
-    @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DOMAIN';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
+    @{ Id = 'D-DNS-CREATECHILD'; O = 'A'; M = 'Przechwytywanie i relay';      C = 'DNS-ZONES';       T = 'Strefy DNS bez ochrony przed ADIDNS spoofing' }
     @{ Id = 'DC-ANONLDAP';       O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Anonimowe zapytania LDAP do DC' }
     @{ Id = 'DC-NETSESSION';     O = 'A'; M = 'Uprawnienia domyślne';         C = 'DC-PROBE';     W = 'DC'; T = 'Wyliczanie sesji SMB na DC (NetCease)' }
     @{ Id = 'D-GPO-LLMNR';       O = 'A'; M = 'Przechwytywanie i relay';      C = 'GPO-ALL';      W = 'DC'; T = 'LLMNR niewyłączony w GPO' }
@@ -942,6 +942,13 @@ function Get-ErrorText($Err) {
 }
 # Odczyt GPO z gPLink kontenera; zwraca obiekty GPO z displayName, gPCFileSysPath, flags; błędy trafiają do $gpoReadErrors
 function Get-DcLinkedGpo {
+    # Wszystkie GPO jednym wyszukiwaniem: GPO bez prawa odczytu po prostu nie wraca (bezpośrednie wiązanie z takim obiektem daje 0x8007200A)
+    $all = @{}
+    try {
+        foreach ($g in @(Find-Ldap -SearchBase "CN=Policies,CN=System,$($domain.DistinguishedName)" -Scope OneLevel -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, gPCFileSysPath, flags)) {
+            $all["$($g.distinguishedname)".ToLower()] = $g
+        }
+    } catch { $gpoReadErrors['CN=Policies'] = Get-ErrorText $_ }
     foreach ($container in @($domain.DistinguishedName, $domain.DomainControllersContainer)) {
         $gpLink = $null
         try { $gpLink = (Get-LdapObject -Identity $container -Properties gPLink).gplink }
@@ -950,10 +957,8 @@ function Get-DcLinkedGpo {
         foreach ($m in [regex]::Matches($gpLink, '\[LDAP://([^;\]]+);(\d+)\]')) {
             if ([int]$m.Groups[2].Value -band 1) { continue }
             $dn = $m.Groups[1].Value
-            $gpo = $null
-            try { $gpo = Get-LdapObject -Identity $dn -Properties displayName, gPCFileSysPath, flags }
-            catch { $gpoReadErrors[$dn] = Get-ErrorText $_; continue }
-            if (-not $gpo) { $gpoReadErrors[$dn] = 'obiekt GPO niewidoczny dla konta przeglądu (brak prawa odczytu lub GPO usunięte)'; continue }
+            $gpo = $all[$dn.ToLower()]
+            if (-not $gpo) { $gpoReadErrors[$dn] = 'GPO niewidoczne dla konta przeglądu (brak prawa odczytu albo GPO usunięte, a łącze zostało)'; continue }
             if ($gpo.flags -band 2) { continue }
             $gpo
         }
@@ -2169,11 +2174,13 @@ Invoke-Check 'DOMAIN' {
         }
     }
 
+    # Osobny try: błąd odczytu stref ma oznaczyć tylko D-DNS-CREATECHILD (ERR-DNS-ZONES), a nie przerwać pozostałych testów domeny
+    try {
     # Strefy DNS w AD: CreateChild dla Authenticated Users/Everyone (domyślne - potrzebne do dynamicznej rejestracji) bez rekordu wildcard
     $wideDns = @{ 'S-1-5-11' = 'Authenticated Users'; 'S-1-1-0' = 'Everyone'; 'S-1-5-7' = 'Anonymous Logon' }
-    $dnsRows = foreach ($base in @("CN=MicrosoftDNS,DC=DomainDnsZones,$domainDn", "CN=MicrosoftDNS,DC=ForestDnsZones,$($rootDse.rootDomainNamingContext)", "CN=MicrosoftDNS,CN=System,$domainDn")) {
+    $dnsRows = foreach ($base in @("DC=DomainDnsZones,$domainDn", "DC=ForestDnsZones,$($rootDse.rootDomainNamingContext)", "CN=System,$domainDn")) {
         $zones = @()
-        try { $zones = @(Find-Ldap -SearchBase $base -Scope OneLevel -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) }
+        try { $zones = @(Find-Ldap -SearchBase $base -Scope Subtree -Filter '(objectClass=dnsZone)' -Properties nTSecurityDescriptor -SecurityDescriptor) }
         catch {
             # partycja/kontener może nie istnieć (0x80072030) - to nie błąd; każdy inny błąd ma dać 'Błąd testu', a nie fałszywe zaliczenie
             $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
@@ -2189,7 +2196,7 @@ Invoke-Check 'DOMAIN' {
             $wild = @()
             try { $wild = @(Find-Ldap -SearchBase $z.distinguishedname -Scope OneLevel -Filter '(name=\2a)') } catch { $wild = @() }
             if (-not $wild.Count) {
-                [pscustomobject]@{ Strefa = $z.name; Partycja = (($base -split ',', 2)[1]); Uprawnieni = ($who -join ', '); RekordWildcard = 'brak' }
+                [pscustomobject]@{ Strefa = $z.name; Partycja = $(if ($base -like 'CN=System,*') { "$base (starsze strefy)" } else { $base }); Uprawnieni = ($who -join ', '); RekordWildcard = 'brak' }
             }
         }
     }
@@ -2202,6 +2209,10 @@ Invoke-Check 'DOMAIN' {
         Fix = (Fx 'Add-DnsServerResourceRecordA -ZoneName <strefa> -Name ''*'' -IPv4Address <adres> -ComputerName <DC>',
                   'Get-DnsServerGlobalQueryBlockList -ComputerName <DC>')
         Mitre = 'T1557'
+    }
+    } catch {
+        Add-Finding @{ Id = 'ERR-DNS-ZONES'; Category = 'Błędy testów'; Severity = 'Info'
+                       Title = "Test stref DNS (D-DNS-CREATECHILD) nie wykonany: $(Get-ErrorText $_)" }
     }
     $rb = Get-LdapObject -Identity "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$configDn" -Properties 'msDS-EnabledFeatureBL'
     if (-not @($rb.'msds-enabledfeaturebl' | Where-Object { $_ }).Count) {
@@ -3307,8 +3318,11 @@ if ($gpoReadErrors.Count) {
         Id = 'INFO-GPO-READ'; Category = 'Błędy testów'; Severity = 'Info'
         Title = "Nie odczytano $($gpoReadErrors.Count) GPO lub plików GPO podpiętych do domeny i OU Domain Controllers"
         Objects = @($gpoReadErrors.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ Obiekt = $_; Blad = $gpoReadErrors[$_] } })
-        Description = 'Konto przeglądu nie mogło odczytać tych GPO (obiektu w AD lub plików w SYSVOL). Ich ustawienia nie zostały uwzględnione w testach konfiguracji DC (LDAP, NTLM, CIS, Microsoft Security Baseline) - wyniki tych testów mogą być niepełne. Przyczyną bywa filtrowanie zabezpieczeń GPO odbierające prawo odczytu zwykłym kontom.'
-        Recommendation = 'Sprawdzić uprawnienia wskazanych GPO (Authenticated Users lub Domain Computers powinny mieć co najmniej odczyt) albo powtórzyć przegląd kontem, które je widzi.'
+        Description = 'Konto przeglądu nie mogło odczytać tych GPO (obiektu w AD lub plików w SYSVOL). Ich ustawienia nie zostały uwzględnione w testach konfiguracji DC (LDAP, NTLM, CIS, Microsoft Security Baseline) - wyniki tych testów mogą być niepełne. Przyczyną bywa filtrowanie zabezpieczeń, z którego usunięto Authenticated Users bez nadania prawa odczytu Domain Computers - od poprawki MS16-072 takie GPO może w ogóle nie być stosowane na komputerach, także na DC.'
+        Recommendation = 'Sprawdzić uprawnienia wskazanych GPO: Authenticated Users lub Domain Computers powinny mieć co najmniej odczyt (bez prawa stosowania, jeśli GPO ma dotyczyć tylko wybranej grupy). Usunąć łącza do nieistniejących GPO. Ustawienia z tych GPO zweryfikować przeglądem z -UseWinRM lub kontem, które je widzi.'
+        Fix = (Fx 'Get-GPO -Guid <GUID z kolumny Obiekt> | Select-Object DisplayName, GpoStatus   # moduł GroupPolicy',
+                  'Get-GPPermission -Guid <GUID> -All | Format-Table Trustee, Permission',
+                  'Set-GPPermission -Guid <GUID> -TargetName ''Domain Computers'' -TargetType Group -PermissionLevel GpoRead')
     }
 }
 
