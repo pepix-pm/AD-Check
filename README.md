@@ -1,4 +1,4 @@
-# PEPIX AD-Check
+# AD-Check
 
 Skrypt PowerShell do przeglądu bezpieczeństwa Active Directory. Działa na **zwykłym koncie domenowym**, bez instalacji agentów i bez narzędzi firm trzecich. Wynikiem jest szczegółowy raport HTML dla właściciela domeny i administratorów oraz dane JSON/CSV do porównań między przeglądami.
 
