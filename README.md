@@ -137,6 +137,7 @@ Odczyt z GPO pokazuje konfigurację zamierzoną; ustawienia lokalne na DC mogą 
 | P-DA-COUNT | Medium | Więcej niż 5 członków Domain Admins | T1078.002 |
 | P-SchemaAdmins, P-AccountOperators, P-ServerOperators, P-PrintOperators, P-BackupOperators | Medium | Niepuste grupy wysokiego ryzyka | T1078.002 |
 | P-DnsAdmins | Medium | Niepusta grupa DnsAdmins (wykonanie kodu na DC przez usługę DNS); członkowie traktowani jak konta uprzywilejowane | T1078.002 |
+| P-KeyAdmins, P-EnterpriseKeyAdmins | Medium | Niepuste grupy Key Admins / Enterprise Key Admins (zapis msDS-KeyCredentialLink na kontach, Shadow Credentials); członkowie traktowani jak konta uprzywilejowane, a domyślne prawa tych grup nie są zgłaszane w ACL | T1078.002 |
 | P-GPCO | Low | Konta spoza administratorów w Group Policy Creator Owners | T1484.001 |
 | P-DELEG | Medium | Konta uprzywilejowane bez ochrony przed delegacją | T1558 |
 | P-STALE | Medium | Nieużywane aktywne konta uprzywilejowane | T1078.002 |

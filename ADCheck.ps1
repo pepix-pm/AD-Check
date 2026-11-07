@@ -84,7 +84,8 @@ if ($braki.Count -eq 0) {
         if (-not $rootDse.defaultNamingContext) { throw 'pusta odpowiedź RootDSE' }
     } catch {
         $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
-        $hint = if ($e.HResult -eq -2147023570) { ' Sprawdź nazwę konta i hasło - przy runas /netonly hasło jest weryfikowane dopiero przy pierwszym połączeniu z domeną.' }
+        $hint = if ($e.HResult -eq -2147022987) { ' Konto jest zablokowane po zbyt wielu błędnych hasłach - odblokuj je (Unlock-ADAccount) albo poczekaj na koniec blokady.' }
+                elseif ($e.HResult -eq -2147023570) { ' Sprawdź nazwę konta i hasło - przy runas /netonly hasło jest weryfikowane dopiero przy pierwszym połączeniu z domeną.' }
                 else { ' Wymagany dostęp do kontrolera domeny (TCP 389) i DNS domeny.' }
         $braki.Add("Brak połączenia LDAP z domeną ($Server): $($e.Message.Trim()) (0x$('{0:X8}' -f $e.HResult)).$hint")
     }
@@ -516,6 +517,8 @@ $ruleCatalog = @(
     @{ Id = 'P-SchemaAdmins';    O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Schema Admins' }
     @{ Id = 'P-AccountOperators'; O = 'P'; M = 'Grupy uprzywilejowane';       C = 'PRIV';         T = 'Niepusta grupa Account Operators' }
     @{ Id = 'P-DnsAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa DnsAdmins' }
+    @{ Id = 'P-KeyAdmins';       O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Key Admins' }
+    @{ Id = 'P-EnterpriseKeyAdmins'; O = 'P'; M = 'Grupy uprzywilejowane';    C = 'PRIV';         T = 'Niepusta grupa Enterprise Key Admins' }
     @{ Id = 'P-GPCO';            O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Nie-admini w Group Policy Creator Owners' }
     @{ Id = 'D-GPP-PASSWORD';    O = 'A'; M = 'Ujawnione hasła';              C = 'GPP';          W = 'DC'; T = 'Hasła w preferencjach GPO (SYSVOL)' }
     @{ Id = 'P-ServerOperators'; O = 'P'; M = 'Grupy uprzywilejowane';        C = 'PRIV';         T = 'Niepusta grupa Server Operators' }
@@ -684,6 +687,8 @@ $planMeta = @{
     'P-SchemaAdmins'   = @(1, 2, 1, '')
     'P-AccountOperators' = @(1, 2, 1, '')
     'P-DnsAdmins'      = @(1, 2, 1, 'Zarządzanie DNS delegować przez uprawnienia do stref, nie przez DnsAdmins')
+    'P-KeyAdmins'      = @(1, 1, 1, 'Sprawdzić, czy członkostwa nie wymaga wdrożenie Windows Hello for Business')
+    'P-EnterpriseKeyAdmins' = @(1, 1, 1, 'Sprawdzić, czy członkostwa nie wymaga wdrożenie Windows Hello for Business')
     'P-GPCO'           = @(0.5, 1, 1, '')
     'D-GPP-PASSWORD'   = @(2, 8, 1, 'Najpierw zmiana ujawnionych haseł, potem usunięcie wpisów z GPO')
     'P-ServerOperators' = @(1, 2, 1, '')
@@ -1231,9 +1236,11 @@ $privGroups = [ordered]@{
     'Print Operators'          = 'S-1-5-32-550'
     'Backup Operators'         = 'S-1-5-32-551'
 }
+$privGroups['Key Admins'] = "$dSid-526"   # domyślnie zapis msDS-KeyCredentialLink na kontach (Shadow Credentials)
 if ($isRoot) {
-    $privGroups['Enterprise Admins'] = "$dSid-519"
-    $privGroups['Schema Admins']     = "$dSid-518"
+    $privGroups['Enterprise Admins']     = "$dSid-519"
+    $privGroups['Schema Admins']         = "$dSid-518"
+    $privGroups['Enterprise Key Admins'] = "$dSid-527"
 }
 # DnsAdmins nie ma stałego SID (grupa domenowa tworzona z rolą DNS) - wyjątek od zasady "po SID"; nazwa grupy nie jest lokalizowana.
 # Członek DnsAdmins może kazać usłudze DNS na DC załadować własną bibliotekę DLL (ServerLevelPluginDll), czyli wykonać kod jako SYSTEM na DC.
@@ -1309,12 +1316,14 @@ Invoke-Check 'PRIV' {
             Mitre = 'T1078.002'
         }
     }
-    foreach ($g in 'Schema Admins','Account Operators','Server Operators','Print Operators','Backup Operators','DnsAdmins') {
+    foreach ($g in 'Schema Admins','Account Operators','Server Operators','Print Operators','Backup Operators','DnsAdmins','Key Admins','Enterprise Key Admins') {
+        if (-not $privGroups.ContainsKey($g)) { continue }
         Add-IfAny @{
             Id = "P-$($g -replace ' ','')"; Category = $catPriv; Severity = 'Medium'
             Title = "Grupa $g nie jest pusta"
             Objects = (Get-GroupRows $g)
-            Description = $(if ($g -eq 'DnsAdmins') { 'Członek grupy DnsAdmins może skonfigurować usługę DNS na kontrolerze domeny tak, aby po restarcie załadowała wskazaną bibliotekę DLL (ServerLevelPluginDll). Kod wykonuje się wtedy jako SYSTEM na DC, co oznacza przejęcie domeny.' }
+            Description = $(if ($g -like '*Key Admins') { "Członkowie grupy $g mogą zapisać klucz uwierzytelniania (msDS-KeyCredentialLink) na kontach w domenie, także administratorów i kontrolerów domeny, a potem zalogować się jako te konta bez znajomości hasła (Shadow Credentials). Grupa służy do administracji Windows Hello for Business i zwykle powinna być pusta." }
+                            elseif ($g -eq 'DnsAdmins') { 'Członek grupy DnsAdmins może skonfigurować usługę DNS na kontrolerze domeny tak, aby po restarcie załadowała wskazaną bibliotekę DLL (ServerLevelPluginDll). Kod wykonuje się wtedy jako SYSTEM na DC, co oznacza przejęcie domeny.' }
                             else { "Członkowie grupy $g mają uprawnienia pozwalające w praktyce przejąć domenę (np. logowanie na DC, kopia NTDS.dit, modyfikacja kont lub schematu)." })
             Recommendation = 'Grupa powinna być pusta. Członkostwo nadawać czasowo, na czas konkretnej, zatwierdzonej zmiany, i usuwać po jej zakończeniu.'
             Fix = (Fx "Remove-ADGroupMember -Identity '$($privGroups[$g])' -Members <konto>")
@@ -1846,7 +1855,8 @@ Invoke-Check 'ACL' {
     $rootSid = $dSid
     try { $rootSid = (Get-LdapObject -Identity $rootDse.rootDomainNamingContext).SID.Value } catch { $rootSid = $dSid }
     $trusted = @{}
-    foreach ($s in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-5-10', 'S-1-3-0', "$dSid-512", "$dSid-516", "$dSid-521", "$rootSid-519", "$rootSid-498") { $trusted[$s] = $true }
+    foreach ($s in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-5-10', 'S-1-3-0', "$dSid-512", "$dSid-516", "$dSid-521", "$rootSid-519", "$rootSid-498",
+                   "$dSid-526", "$rootSid-527") { $trusted[$s] = $true }   # Key Admins / Enterprise Key Admins: domyślny zapis msDS-KeyCredentialLink (Windows Hello for Business), grupy zgłaszane w P-KeyAdmins
 
     # Obiekt domeny: DCSync i prawa pozwalające przejąć domenę
     $domSd = (Get-LdapObject -Identity $domainDn -Properties nTSecurityDescriptor -SecurityDescriptor).ntsecuritydescriptor
@@ -1940,7 +1950,7 @@ Invoke-Check 'ACL-TIER0' {
     $t0Trusted = @{}
     # Account Operators ma domyślnie pełne prawa do kont spoza grup chronionych; sama grupa jest zgłaszana w P-AccountOperators
     foreach ($s in 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-9', 'S-1-5-10', 'S-1-3-0', "$dSid-512", "$dSid-516", "$dSid-521", "$rootSid-519", "$rootSid-498",
-                   'S-1-5-32-548') { $t0Trusted[$s] = $true }
+                   "$dSid-526", "$rootSid-527", 'S-1-5-32-548') { $t0Trusted[$s] = $true }
     # Wpisy skopiowane z AdminSDHolder zgłasza D-ACL-ADMINSDHOLDER - na kontach chronionych (adminCount=1) nie są powtarzane
     $ashSids = @{}
     try {
